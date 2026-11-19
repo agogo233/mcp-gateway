@@ -120,7 +120,7 @@ healthcheck 使用；携带有效 token 访问 `/healthz` 才返回含上游 URL
 ```
 
 因此**把网关暴露到局域网前必须先启用 auth**，并建议 compose `ports` 绑定宿主机具体 IP
-（如 `"192.168.31.10:9200:9200"`）再配合防火墙限源；仅容器网络内使用时无需暴露端口。
+（如 `"10.0.0.10:9200:9200"`）再配合防火墙限源；仅容器网络内使用时无需暴露端口。
 
 ## 管理控制台
 
@@ -138,7 +138,7 @@ healthcheck 使用；携带有效 token 访问 `/healthz` 才返回含上游 URL
 - 配置读取接口**脱敏**：headers 值一律显示 `***`，token 只显示指纹（SHA-256 前 12 位）；保存时 `***`/指纹表示沿用原值，因此控制台永远不会回显明文秘密；
 - 修改 `listen` 仍需重启进程；变更上游会重建其连接，进行中的调用可能失败（保存后页面会给出警告）；
 - 保存会**重写 gateway.json**（统一为命名 token 对象格式、权限 0600、仅保留网关认识的字段）；容器只读挂载（`:ro`）时保存失败并在响应中说明，需改为可写挂载；
-- 控制台具备配置写权限，**切勿暴露到不可信网络**：局域网访问务必启用 `console.tokens`、compose `ports` 绑定宿主机具体 IP 并配合防火墙限源（见 `compose-fragment.yml` 注释）。
+- 控制台具备配置写权限，**切勿暴露到不可信网络**：局域网访问务必启用 `console.tokens`、`ports` 绑定可信来源（deploy 栈默认 `127.0.0.1`，局域网用 `.env` 的 `MCP_GATEWAY_ADDR=0.0.0.0` 或宿主机 IP）并配合防火墙限源。
 
 ## 本地开发
 
@@ -148,10 +148,26 @@ go build ./... && go vet ./... && go test ./... -race -count=1
 
 ## 部署（Docker）
 
+推荐使用 `deploy/` 独立部署栈（网关 + go-github-mcp，加入 opencode 所在的 `opencode-net` 网络，
+与 OpenCodeUI 的 compose 完全解耦）：
+
+```sh
+cd deploy
+cp .env.example .env        # 填入 GITHUB_PERSONAL_ACCESS_TOKEN（细粒度 PAT）
+docker compose up -d --build
+```
+
+`deploy/.env` 可调项：`GITHUB_TOOLSETS`（`default` 或 `all`）、`GITHUB_MCP_READ_ONLY`、
+`MCP_GATEWAY_ADDR`（控制台/MCP 暴露地址：默认 `127.0.0.1` 仅宿主机本机；局域网访问设 `0.0.0.0`
+或宿主机 IP，并建议配合防火墙限源）。
+
+单容器手动运行（备选）：
+
 ```sh
 docker build -t mcp-gateway:latest .
 docker run -d --name mcp-gateway \
   -v $PWD/gateway.json:/etc/mcp-gateway/gateway.json:ro \
+  -p 127.0.0.1:9200:9200 \
   --network <opencode所在网络> \
   mcp-gateway:latest
 curl http://127.0.0.1:9200/healthz
@@ -161,13 +177,9 @@ docker kill -s HUP mcp-gateway
 
 （需要通过管理控制台保存配置时，把上面的 `:ro` 去掉改为可写挂载。）
 
-compose 接入片段见 `compose-fragment.yml`。注意：网关只需加入 opencode 所在的 compose 网络，
-**不要**把 9200 端口发布到宿主机/局域网；确有局域网接入需求时，必须先启用 auth（见"鉴权"），
-并用 `ports` 绑定宿主机具体 IP、配合防火墙限源。
-
 ## opencode 侧接入
 
-`opencode.jsonc` 的 `mcp` 配置只改 URL，键名保持不变（工具名因此完全不变）：
+`opencode.jsonc` 的 `mcp` 配置只改 URL。逐上游接入（键名不变，工具名不变）：
 
 ```jsonc
 "mcp": {
@@ -176,7 +188,21 @@ compose 接入片段见 `compose-fragment.yml`。注意：网关只需加入 ope
 }
 ```
 
-（原来直连上游时需要的 Authorization 头移到 gateway.json 的 `headers` 中。）
+或聚合单端点（`deploy/opencode.jsonc` 模板即此模式，工具名带 `all_` 前缀）：
+
+```jsonc
+"mcp": {
+  "all": {
+    "type": "remote",
+    "url": "http://mcp-gateway:9200/mcp/all",
+    "headers": { "Authorization": "Bearer <网关token>" },
+    "enabled": true
+  }
+}
+```
+
+（原来直连上游时需要的 Authorization 头移到 gateway.json 的 `headers` 中；启用 auth 后
+opencode 侧也需按"鉴权"一节加上网关 token 的 headers。）
 
 ## 已知限制
 

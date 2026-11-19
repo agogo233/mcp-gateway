@@ -1,2 +1,4 @@
 mcp-gateway
 gateway.json
+deploy/.env
+deploy/opencode.jsonc

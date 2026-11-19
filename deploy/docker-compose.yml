@@ -1,0 +1,58 @@
+# MCP 独立部署栈：故障隔离网关 + GitHub MCP
+# 前提：OpenCodeUI 栈已启动（网络 opencode-net 已存在）。
+# 用法：cp .env.example .env，填入 GITHUB_PERSONAL_ACCESS_TOKEN 后：
+#   docker compose up -d --build
+#
+# 控制台：浏览器打开 http://<宿主机IP>:9200/ ，首次粘贴 console token
+# （gateway.json 的 console.tokens，与下游 token 相互独立）。
+
+services:
+  mcp-gateway:
+    build:
+      context: ..
+    # 网关镜像首次发布后可切换为：
+    # image: ghcr.io/<owner>/mcp-gateway:latest
+    image: mcp-gateway:local
+    container_name: mcp-gateway
+    restart: unless-stopped
+    depends_on:
+      github-mcp:
+        condition: service_healthy
+    ports:
+      # 控制台与 MCP 端点。默认仅宿主机本机；.env 里设 MCP_GATEWAY_ADDR=0.0.0.0
+      # 可开放给局域网（/mcp/* 与 /api/* 均需各自 token，建议配合防火墙限源）。
+      - "${MCP_GATEWAY_ADDR:-127.0.0.1}:9200:9200"
+    volumes:
+      - ../gateway.json:/etc/mcp-gateway/gateway.json:ro
+    networks:
+      - opencode-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9200/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  github-mcp:
+    image: ghcr.io/agogo233/go-github-mcp:latest
+    container_name: github-mcp
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      MCP_TRANSPORT: http
+      HTTP_ADDR: 0.0.0.0:8080
+      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN}
+      AUTH_TOKEN: ${GITHUB_MCP_AUTH_TOKEN}
+      GITHUB_TOOLSETS: ${GITHUB_TOOLSETS:-default}
+      READ_ONLY: ${GITHUB_MCP_READ_ONLY:-false}
+    networks:
+      - opencode-net
+    # 镜像自带 HEALTHCHECK(8080/healthz)
+
+networks:
+  opencode-net:
+    external: true
+    name: opencode-net
