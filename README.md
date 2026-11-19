@@ -61,6 +61,7 @@
 - `aggregate`：聚合端点路径段（如 `"all"` → `/mcp/all`），缺省关闭
 - `watchConfig`：是否监听配置文件变化自动热更新，默认 true
 - `auth.tokens`：网关接入鉴权的 Bearer token 列表（可选，见下文"鉴权"）
+- `console.tokens`：管理控制台（`/api/*`）专用 Bearer token 列表（可选，见下文"管理控制台"）
 - `upstreams[].callTimeoutMs`：单次调用超时，默认 60000
 - `upstreams[].headers`：发往上游的附加头（如 Bearer token）
 
@@ -68,19 +69,39 @@
 
 ## 鉴权
 
+网关涉及**三种相互独立的凭据**，不得混用（配置校验会拒绝 console 与 auth 复用同一 token）：
+
+| 凭据 | 谁在用 | 用在哪 | 配置位置 |
+|------|--------|--------|----------|
+| 上游凭据 | 网关 → 上游 MCP | 访问上游时携带 | `upstreams[].headers` |
+| 下游接入凭据 | opencode 等客户端 → 网关 | 调用 `/mcp/*` | `auth.tokens` |
+| 管理凭据 | 管理员浏览器 → 控制台 | 登录 Web 控制台、`/api/*` | `console.tokens` |
+
+`auth.tokens` 支持两种写法（可混用，旧格式完全兼容）：
+
+```json
+{
+  "auth": {
+    "tokens": [
+      "openssl rand -hex 32 产生的64位hex",
+      {"name": "opencode", "token": "……"},
+      {"name": "ci-bot", "token": "……"}
+    ]
+  },
+  "console": {
+    "tokens": ["另一个 openssl rand -hex 32"]
+  }
+}
+```
+
 在 `gateway.json` 中配置 `auth.tokens` 后，所有 `/mcp/*` 端点（含聚合端点）都要求
 `Authorization: Bearer <token>`，未携带或错误的请求一律返回 `401`。`/healthz` 保持免鉴权
 （未带有效 token 时只返回 `{"status":"ok"}` 等存活信息，**不泄露上游拓扑**），供容器
 healthcheck 使用；携带有效 token 访问 `/healthz` 才返回含上游 URL、失败计数等完整健康详情。
 
-```json
-{
-  "auth": { "tokens": ["<openssl rand -hex 32 产生的64位hex>"] }
-}
-```
-
 - token 生成：`openssl rand -hex 32`；最短 16 字符，禁止重复；
-- token 与上游凭据（如 x64dbg 的 Bearer）是**两个独立秘密**，不要混用；
+- 命名 token 的 `name` 仅用于控制台展示与调用日志归因（日志只记名字或指纹前 12 位，绝不记完整 token）；
+- 三种凭据（上游/下游/管理）是**相互独立的秘密**，不要混用；
 - 比较使用 SHA-256 + 常数时间比较，不泄露 token 内容与长度；
 - **零停机轮换**：把新 token 追加进 `tokens` → 热更新生效 → 客户端切换 → 再删掉旧 token → 再次热更新；
 - token 只放在 gitignore 的 `gateway.json` 与客户端配置里，不要提交、不要写进 `gateway.example.json`（那里只有占位符）。
@@ -101,6 +122,24 @@ healthcheck 使用；携带有效 token 访问 `/healthz` 才返回含上游 URL
 因此**把网关暴露到局域网前必须先启用 auth**，并建议 compose `ports` 绑定宿主机具体 IP
 （如 `"192.168.31.10:9200:9200"`）再配合防火墙限源；仅容器网络内使用时无需暴露端口。
 
+## 管理控制台
+
+网关内嵌中文管理控制台（纯静态单页，`go:embed` 打包进二进制，无额外依赖）：
+
+- 浏览器打开 `http://<网关地址>:9200/` 即可使用；
+- **健康总览**：进程状态、各上游 up/down、失败计数、最近错误、目录条数、聚合端点；
+- **工具目录**：按上游浏览 tools/prompts/resources 及其 schema（本地镜像，分页 + 名称过滤）；
+- **配置管理**：结构化表单编辑全局参数、上游（增删改、headers）、auth/console 令牌；保存后校验并**原子写回 gateway.json**，随即热更新生效（也可取消勾选写盘，仅内存生效）；
+- **最近活动**：内存环形缓冲（最近 500 条，重启清空）的调用与状态事件时间线，含调用方 token 归因、来源 IP、成败与耗时；不记录调用参数。
+
+访问控制与安全边界：
+
+- 页面静态资源免鉴权（不含敏感数据）；所有 `/api/*` 要求 `console.tokens` 中的 Bearer token，与下游 `auth.tokens` 完全独立，未配置 `console.tokens` 时控制台 API 一律 `403`；
+- 配置读取接口**脱敏**：headers 值一律显示 `***`，token 只显示指纹（SHA-256 前 12 位）；保存时 `***`/指纹表示沿用原值，因此控制台永远不会回显明文秘密；
+- 修改 `listen` 仍需重启进程；变更上游会重建其连接，进行中的调用可能失败（保存后页面会给出警告）；
+- 保存会**重写 gateway.json**（统一为命名 token 对象格式、权限 0600、仅保留网关认识的字段）；容器只读挂载（`:ro`）时保存失败并在响应中说明，需改为可写挂载；
+- 控制台具备配置写权限，**切勿暴露到不可信网络**：局域网访问务必启用 `console.tokens`、compose `ports` 绑定宿主机具体 IP 并配合防火墙限源（见 `compose-fragment.yml` 注释）。
+
 ## 本地开发
 
 ```sh
@@ -119,6 +158,8 @@ curl http://127.0.0.1:9200/healthz
 # 热更新：改完宿主机上的 gateway.json 后
 docker kill -s HUP mcp-gateway
 ```
+
+（需要通过管理控制台保存配置时，把上面的 `:ro` 去掉改为可写挂载。）
 
 compose 接入片段见 `compose-fragment.yml`。注意：网关只需加入 opencode 所在的 compose 网络，
 **不要**把 9200 端口发布到宿主机/局域网；确有局域网接入需求时，必须先启用 auth（见"鉴权"），
