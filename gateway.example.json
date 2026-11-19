@@ -10,11 +10,11 @@
   "auth": {
     "tokens": [
       "<openssl-rand-hex-32>",
-      {"name": "opencode", "token": "<another-openssl-rand-hex-32>"}
+      {"name": "opencode", "token": "<second-openssl-rand-hex-32>"}
     ]
   },
   "console": {
-    "tokens": ["<another-openssl-rand-hex-32>"]
+    "tokens": ["<third-openssl-rand-hex-32>"]
   },
   "upstreams": [
     {
