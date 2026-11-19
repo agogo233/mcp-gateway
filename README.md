@@ -122,6 +122,11 @@ healthcheck 使用；携带有效 token 访问 `/healthz` 才返回含上游 URL
 因此**把网关暴露到局域网前必须先启用 auth**，并建议 compose `ports` 绑定宿主机具体 IP
 （如 `"10.0.0.10:9200:9200"`）再配合防火墙限源；仅容器网络内使用时无需暴露端口。
 
+**传输加密（TLS）**：客户端↔网关、网关↔上游当前均为**明文 HTTP**，上表三类 Bearer 凭据
+在链路上可被嗅探。仅建议在可信网络（容器内网、防火墙限源的局域网）明文运行；需要经过
+不可信网络时，请在网关前置 TLS 反向代理（Nginx/Caddy/Traefik 等）终结 HTTPS，网关本身
+不要直接暴露公网。
+
 ## 管理控制台
 
 网关内嵌中文管理控制台（纯静态单页，`go:embed` 打包进二进制，无额外依赖）：
@@ -212,3 +217,4 @@ opencode 侧也需按"鉴权"一节加上网关 token 的 headers。）
 - 资源订阅（resources/subscribe）与资源模板不做镜像（仅列 resources）。
 - 上游 down 时，调用未注册工具返回 JSON-RPC "unknown tool" 错误（协议标准行为），快速失败。
 - 聚合端点的名字拼接在极端情况下可能歧义（上游名互为前缀），重名按上游名排序先者胜出、告警一次；调用按注册归属路由，不会执行错误上游的工具。
+- `/mcp/*` 请求体上限 4MiB（go-sdk `StreamableHTTPHandler` 的 `MaxRequestBodyBytes` 内置保护），超出返回 413。
