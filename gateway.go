@@ -262,6 +262,15 @@ func (g *gateway) shutdown(srv *http.Server) {
 	sctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	_ = srv.Shutdown(sctx)
+	// srv.Shutdown drains in-flight handlers (bounded by the timeout),
+	// including console API calls running applyConfig. Hold reloadMu across
+	// the wait below so no hot reload can call wg.Add concurrently with
+	// wg.Wait ("Add after Wait" is undefined). A reload already in flight
+	// always finishes first: applyConfig is bounded (removeUpstream waits at
+	// most 3s), and upstreams added after ctx cancellation exit their probe
+	// loop immediately.
+	g.reloadMu.Lock()
+	defer g.reloadMu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		g.wg.Wait()

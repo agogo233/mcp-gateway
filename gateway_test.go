@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1126,5 +1127,102 @@ func TestAggregatePrefixConflictRouting(t *testing.T) {
 			t.Fatalf("a_b_c must route to its owner upstream a, last err=%v res=%+v", err, res)
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// TestShutdownRacesWithReload: a hot reload racing with shutdown must not
+// trip the WaitGroup "Add called concurrently with Wait" misuse. shutdown
+// holds reloadMu across its wg.Wait, so every applyConfig (the only runtime
+// wg.Add path) has finished before the wait starts. Run with -race.
+func TestShutdownRacesWithReload(t *testing.T) {
+	f1 := newFakeUpstream(t, false)
+	f2 := newFakeUpstream(t, false)
+	urls := map[string]string{"a": f1.ts.URL, "b": f2.ts.URL}
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "gateway.json")
+
+	writeCfg := func(names ...string) {
+		t.Helper()
+		ups := make([]UpstreamConfig, 0, len(names))
+		for _, n := range names {
+			ups = append(ups, UpstreamConfig{Name: n, URL: urls[n]})
+		}
+		cfg := Config{
+			Listen:           ":0",
+			ProbeIntervalMs:  50,
+			ConnectTimeoutMs: 500,
+			ListTimeoutMs:    500,
+			FailureThreshold: 2,
+			Upstreams:        ups,
+		}
+		data, err := json.Marshal(cfg)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+			t.Error(err)
+			return
+		}
+	}
+
+	writeCfg("a")
+	g := newGateway(mustLoad(t, cfgPath), "test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g.start(ctx)
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: g.handler()}
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	// Hammer applyConfig (via reloadFrom) concurrently with shutdown: every
+	// toggle adds/removes upstream "b", i.e. calls wg.Add, so an unfixed
+	// shutdown can race its wg.Wait against a concurrent Add.
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	closeStop := func() { stopOnce.Do(func() { close(stop) }) }
+	t.Cleanup(closeStop)
+	var reloads sync.WaitGroup
+	reloads.Add(1)
+	go func() {
+		defer reloads.Done()
+		toggle := false
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			toggle = !toggle
+			if toggle {
+				writeCfg("a", "b")
+			} else {
+				writeCfg("a")
+			}
+			g.reloadFrom(cfgPath)
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond) // let a few reloads land first
+	cancel()
+	g.shutdown(srv)
+	closeStop()
+	reloads.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		g.wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background loops did not exit after shutdown")
 	}
 }
