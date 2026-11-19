@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mcp-gateway 管理控制台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <h1>Ⓜ mcp-gateway 管理控制台</h1>
+  <span class="ver" id="verBadge"></span>
+  <div class="spacer"></div>
+  <span class="badge" id="connBadge">● 连接中…</span>
+  <span class="badge" id="authBadge">未认证</span>
+  <button class="ghost" id="btnReauth" type="button">更换管理令牌</button>
+</header>
+
+<nav>
+  <button class="active" data-tab="health" type="button">健康总览</button>
+  <button data-tab="catalog" type="button">工具目录</button>
+  <button data-tab="config" type="button">配置管理</button>
+  <button data-tab="logs" type="button">最近活动</button>
+</nav>
+
+<main>
+  <!-- ===== 健康总览 ===== -->
+  <section id="tab-health">
+    <div class="cards">
+      <div class="card"><div class="label">运行状态</div><div class="value" id="hStatus">…</div><div class="sub" id="hTime"></div></div>
+      <div class="card"><div class="label">运行时长</div><div class="value" id="hUptime">…</div><div class="sub">自进程启动</div></div>
+      <div class="card"><div class="label">上游</div><div class="value" id="hUpstreams">…</div><div class="sub" id="hUpstreamsSub"></div></div>
+      <div class="card"><div class="label">聚合端点</div><div class="value" id="hAgg">…</div><div class="sub" id="hAggSub"></div></div>
+    </div>
+    <h2>上游健康</h2>
+    <div id="upHealthList"></div>
+    <div class="muted" style="margin-top:8px">本页每 5 秒自动刷新。</div>
+  </section>
+
+  <!-- ===== 工具目录 ===== -->
+  <section id="tab-catalog" class="hidden">
+    <div class="toolbar">
+      <select id="catUp"></select>
+      <input type="text" id="catQ" placeholder="按名称过滤…" style="width:220px">
+      <span class="muted">数据来自网关本地镜像目录（探测周期同步）</span>
+    </div>
+    <h2>Tools</h2><table id="toolsTable"></table>
+    <h2>Prompts</h2><table id="promptsTable"></table>
+    <h2>Resources</h2><table id="resourcesTable"></table>
+  </section>
+
+  <!-- ===== 配置管理 ===== -->
+  <section id="tab-config" class="hidden">
+    <div class="grid2">
+      <div>
+        <h2>全局参数</h2>
+        <div class="card">
+          <div class="row">
+            <div class="field" style="flex:1"><label>listen（变更需重启进程）</label><input type="text" id="cfgListen"></div>
+            <div class="field" style="flex:1"><label>aggregate（留空关闭）</label><input type="text" id="cfgAggregate"></div>
+          </div>
+          <div class="row">
+            <div class="field" style="flex:1"><label>probeIntervalMs</label><input type="number" id="cfgProbe"></div>
+            <div class="field" style="flex:1"><label>connectTimeoutMs</label><input type="number" id="cfgConnect"></div>
+          </div>
+          <div class="row">
+            <div class="field" style="flex:1"><label>listTimeoutMs</label><input type="number" id="cfgList"></div>
+            <div class="field" style="flex:1"><label>failureThreshold</label><input type="number" id="cfgFailure"></div>
+          </div>
+        </div>
+
+        <h2>下游接入令牌 <span class="tag">auth.tokens · 命名</span></h2>
+        <table id="authTokenTable"></table>
+        <div class="row" style="margin-top:10px">
+          <input type="text" id="newAuthName" placeholder="名称，如 opencode" style="flex:1">
+          <input type="text" id="newAuthTok" placeholder="openssl rand -hex 32" style="flex:2">
+          <button class="ghost" id="btnAddAuth" type="button">添加</button>
+        </div>
+        <div class="muted" style="margin-top:6px">明文保存后不回显，仅显示指纹；改名时令牌保持不变（按指纹定位）。多个 token 叠加可实现零停机轮换。</div>
+
+        <h2>管理控制台令牌 <span class="tag">console.tokens</span></h2>
+        <table id="consoleTokenTable"></table>
+        <div class="row" style="margin-top:10px">
+          <input type="text" id="newConsoleTok" placeholder="openssl rand -hex 32" style="flex:2">
+          <button class="ghost" id="btnAddConsole" type="button">添加</button>
+        </div>
+        <div class="warnbox">⚠ 管理令牌、下游令牌、上游凭据必须相互独立（重复 token 将被拒绝保存）。删除全部管理令牌将无法再访问控制台，只能修改 gateway.json 恢复。</div>
+      </div>
+
+      <div>
+        <h2>上游列表 <span class="tag">upstreams[].headers 为上游凭据，与上述令牌无关</span></h2>
+        <div id="upList"></div>
+        <button class="ghost" id="btnAddUpstream" type="button">+ 添加上游</button>
+        <h2>保存</h2>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <button class="primary" id="btnSave" type="button">保存并热更新</button>
+          <button class="ghost" id="btnReloadCfg" type="button">放弃修改并重载</button>
+          <label class="muted"><input type="checkbox" id="cfgPersist" checked> 写回 gateway.json（取消则仅内存生效，重启丢失）</label>
+        </div>
+        <div id="saveResult"></div>
+        <div class="muted" style="margin-top:10px">
+          保存 = 校验 → 原子写回 gateway.json（需可写挂载）→ 热更新生效。headers 值显示为 ***，保持不变请勿修改；修改上游会重建其连接，进行中的调用可能失败。
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 最近活动 ===== -->
+  <section id="tab-logs" class="hidden">
+    <div class="toolbar">
+      <span class="muted">网关内存环形缓冲，最近 500 条，重启即清空；不记录调用参数与完整令牌。</span>
+      <div style="flex:1"></div>
+      <select id="logType">
+        <option value="">全部</option>
+        <option value="call">仅调用</option>
+        <option value="event">仅状态事件</option>
+      </select>
+      <button class="ghost" id="btnRefreshLogs" type="button">刷新</button>
+    </div>
+    <table id="logTable"></table>
+  </section>
+</main>
+
+<footer>数据由 /api/health、/api/catalog、/api/config、/api/logs 提供；请勿将本控制台暴露到不可信网络。</footer>
+
+<div class="mask hidden" id="loginMask">
+  <div class="login">
+    <h3>管理控制台令牌</h3>
+    <p>请输入 <b>console.tokens</b> 中的管理令牌。它与下游接入令牌（auth.tokens）、上游凭据相互独立。仅保存在浏览器 localStorage。</p>
+    <input type="password" id="tokenInput" placeholder="console token">
+    <button class="primary" id="btnLogin" type="button" style="width:100%">进入控制台</button>
+    <div id="loginErr" style="color:var(--red);font-size:12px;margin-top:10px"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
