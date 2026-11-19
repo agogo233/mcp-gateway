@@ -107,6 +107,9 @@ function renderHealth(h) {
   $('#upHealthList').innerHTML = ups.map(u => {
     const disabled = u.enabled === false;
     const quarantined = u.quarantined === true;
+    // Config-disabled or runtime-quarantined: not serving either way, so
+    // the toggle button must offer "enable" (resume clears quarantine).
+    const off = disabled || quarantined;
     const cls = disabled ? 'unknown' : u.state === 'up' ? 'up' : u.state === 'down' ? 'down' : 'unknown';
     const stateLabel = disabled ? '已停用' : (quarantined ? u.state + ' · 已自动禁用' : u.state);
     return '<div class="up-card"><div class="dot ' + cls + '"></div><div>' +
@@ -119,8 +122,8 @@ function renderHealth(h) {
       (u.lastError ? '<div class="err">last error: ' + esc(u.lastError) + '</div>' : '') +
       '</div><div class="meta">' + esc(stateLabel) + ' · 失败 ' + esc(u.failures) +
       (u.lastTransition ? '<br>最近切换 ' + esc(new Date(u.lastTransition).toLocaleString('zh-CN', { hour12: false })) : '') +
-      '<br><button class="ghost" data-action="toggle-upstream" data-name="' + esc(u.name) + '" data-enabled="' + (!disabled) + '" type="button">' +
-      (disabled ? '启用' : '停用') + '</button>' +
+      '<br><button class="ghost" data-action="toggle-upstream" data-name="' + esc(u.name) + '" data-enabled="' + off + '" type="button">' +
+      (off ? '启用' : '停用') + '</button>' +
       '</div></div>';
   }).join('') || '<div class="muted">暂无上游</div>';
 }

@@ -514,6 +514,52 @@ func TestUpstreamToggleLifecycle(t *testing.T) {
 	}
 }
 
+// TestUpstreamToggleClearsQuarantine: the console toggle is the resume path
+// for an auto-disabled (quarantined) upstream. Quarantine is runtime-only —
+// the persisted config still says enabled — so toggling to enabled must
+// clear the flag, reset failures and bring the endpoint back.
+func TestUpstreamToggleClearsQuarantine(t *testing.T) {
+	g, ts, path := startConsoleGateway(t, nil)
+	waitForState(t, ts.URL+"/healthz", "test", "up", 5*time.Second)
+	u := g.upstream("test")
+	if u == nil {
+		t.Fatal("runner missing")
+	}
+	u.mu.Lock()
+	u.quarantined = true
+	u.failures = 99
+	u.mu.Unlock()
+
+	if resp, body := toggleRequest(t, ts.URL, consoleToken, "test", true); resp.StatusCode != http.StatusOK {
+		t.Fatalf("toggle on: expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	if u.isQuarantined() {
+		t.Fatal("quarantine must be cleared after re-enable")
+	}
+	u.mu.Lock()
+	failures := u.failures
+	u.mu.Unlock()
+	if failures != 0 {
+		t.Fatalf("failures must reset on resume, got %d", failures)
+	}
+	// Quarantine is runtime-only: re-enabling must never persist
+	// enabled:false for the upstream (the toggle writes enabled:true).
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"enabled": false`) {
+		t.Fatalf("re-enable must not persist enabled:false: %s", string(data))
+	}
+	waitForState(t, ts.URL+"/healthz", "test", "up", 5*time.Second)
+	cs := connectClient(t, ts.URL+"/mcp/test")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := cs.ListTools(ctx, nil); err != nil {
+		t.Fatalf("resumed upstream must serve tools: %v", err)
+	}
+}
+
 func TestUpstreamToggleAuthAndValidation(t *testing.T) {
 	_, ts, _ := startConsoleGateway(t, func(cfg *Config) {
 		cfg.Auth = &AuthConfig{Tokens: []AuthClient{{Name: "opencode", Token: "downstream-token-0123456"}}}
