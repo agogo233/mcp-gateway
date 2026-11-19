@@ -168,11 +168,13 @@ func (a *aggregate) sync() {
 		}
 	}
 	for name, t := range desiredTools {
-		if cur, ok := a.toolDefs[name]; ok {
-			if defJSONEqual(cur, t) {
-				continue
-			}
-			// Same exposed name but changed definition: replace it.
+		// Re-register when the definition changed OR when the owning
+		// upstream changed: two different upstream tools can serialize to the
+		// same exposed definition, and only the owner decides routing.
+		if cur, ok := a.toolDefs[name]; ok && a.tools[name] == toolOwner[name] && defJSONEqual(cur, t) {
+			continue
+		}
+		if _, registered := a.toolDefs[name]; registered {
 			a.server.RemoveTools(name)
 			delete(a.tools, name)
 			delete(a.toolDefs, name)
@@ -191,10 +193,10 @@ func (a *aggregate) sync() {
 		}
 	}
 	for name, p := range desiredPrompts {
-		if cur, ok := a.promptDefs[name]; ok {
-			if defJSONEqual(cur, p) {
-				continue
-			}
+		if cur, ok := a.promptDefs[name]; ok && a.prompts[name] == promptOwner[name] && defJSONEqual(cur, p) {
+			continue
+		}
+		if _, registered := a.promptDefs[name]; registered {
 			a.server.RemovePrompts(name)
 			delete(a.prompts, name)
 			delete(a.promptDefs, name)
@@ -213,10 +215,10 @@ func (a *aggregate) sync() {
 		}
 	}
 	for uri, r := range desiredResources {
-		if cur, ok := a.resourceDefs[uri]; ok {
-			if defJSONEqual(cur, r) {
-				continue
-			}
+		if cur, ok := a.resourceDefs[uri]; ok && a.resources[uri] == resOwner[uri] && defJSONEqual(cur, r) {
+			continue
+		}
+		if _, registered := a.resourceDefs[uri]; registered {
 			a.server.RemoveResources(uri)
 			delete(a.resources, uri)
 			delete(a.resourceDefs, uri)

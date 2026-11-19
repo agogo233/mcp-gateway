@@ -28,6 +28,7 @@ func main() {
 	defer stop()
 
 	g := newGateway(cfg, version)
+	g.configPath = *cfgPath
 	g.start(ctx)
 
 	srv := &http.Server{

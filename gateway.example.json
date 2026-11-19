@@ -8,7 +8,13 @@
   "aggregate": "all",
   "watchConfig": true,
   "auth": {
-    "tokens": ["<openssl-rand-hex-32>"]
+    "tokens": [
+      "<openssl-rand-hex-32>",
+      {"name": "opencode", "token": "<another-openssl-rand-hex-32>"}
+    ]
+  },
+  "console": {
+    "tokens": ["<another-openssl-rand-hex-32>"]
   },
   "upstreams": [
     {

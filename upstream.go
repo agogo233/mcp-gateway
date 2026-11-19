@@ -451,6 +451,7 @@ func (u *upstream) recordSuccess() {
 		log.Printf("upstream %q is up", u.cfg.Name)
 		u.state = stateUp
 		u.lastTransition = time.Now()
+		u.gw.logs.add(logEntry{Time: time.Now(), Kind: "event", Event: "up", Upstream: u.cfg.Name})
 	}
 }
 
@@ -472,6 +473,10 @@ func (u *upstream) recordFailure(err error) bool {
 		u.state = stateDown
 		u.lastTransition = time.Now()
 		u.clearCatalogLocked()
+		u.gw.logs.add(logEntry{
+			Time: time.Now(), Kind: "event", Event: "down",
+			Upstream: u.cfg.Name, Detail: truncate(err.Error(), maxDetailLen),
+		})
 		return true
 	}
 	if u.failures%10 == 0 {
@@ -521,10 +526,27 @@ func errText(err error) string {
 	return err.Error()
 }
 
-// logCall records one forwarded call's outcome without ever logging
-// arguments (they may contain sensitive content).
-func (u *upstream) logCall(kind, name string, start time.Time, ok bool, detail string) {
+// logCall records one forwarded call's outcome in the console activity log
+// (with caller attribution) and in the standard container log, without ever
+// logging arguments (they may contain sensitive content).
+func (u *upstream) logCall(ctx context.Context, kind, name string, start time.Time, ok bool, detail string) {
 	dur := time.Since(start).Round(time.Millisecond)
+	p, srcIP := requestPrincipal(ctx)
+	caller := p.Fingerprint
+	if p.Name != "" {
+		caller = p.Name
+	}
+	u.gw.logs.add(logEntry{
+		Time:     time.Now(),
+		Kind:     kind,
+		Caller:   caller,
+		SrcIP:    srcIP,
+		Name:     name,
+		Upstream: u.cfg.Name,
+		OK:       ok,
+		Detail:   truncate(detail, maxDetailLen),
+		DurMs:    dur.Milliseconds(),
+	})
 	if ok {
 		log.Printf("call %s %q upstream %q ok dur=%s", kind, name, u.cfg.Name, dur)
 		return
@@ -538,7 +560,7 @@ func (u *upstream) handleTool(ctx context.Context, req *mcp.CallToolRequest) (*m
 	start := time.Now()
 	s := u.currentSession()
 	if s == nil {
-		u.logCall("tool", req.Params.Name, start, false, "upstream unavailable")
+		u.logCall(ctx, "tool", req.Params.Name, start, false, "upstream unavailable")
 		return &mcp.CallToolResult{
 			IsError: true,
 			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("upstream %q is unavailable", u.cfg.Name)}},
@@ -551,13 +573,13 @@ func (u *upstream) handleTool(ctx context.Context, req *mcp.CallToolRequest) (*m
 		Arguments: req.Params.Arguments,
 	})
 	if err != nil {
-		u.logCall("tool", req.Params.Name, start, false, err.Error())
+		u.logCall(ctx, "tool", req.Params.Name, start, false, err.Error())
 		return &mcp.CallToolResult{
 			IsError: true,
 			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("upstream %q call %q failed: %v", u.cfg.Name, req.Params.Name, err)}},
 		}, nil
 	}
-	u.logCall("tool", req.Params.Name, start, !res.IsError, "error result")
+	u.logCall(ctx, "tool", req.Params.Name, start, !res.IsError, "error result")
 	return res, nil
 }
 
@@ -565,7 +587,7 @@ func (u *upstream) handlePrompt(ctx context.Context, req *mcp.GetPromptRequest) 
 	start := time.Now()
 	s := u.currentSession()
 	if s == nil {
-		u.logCall("prompt", req.Params.Name, start, false, "upstream unavailable")
+		u.logCall(ctx, "prompt", req.Params.Name, start, false, "upstream unavailable")
 		return nil, fmt.Errorf("upstream %q is unavailable", u.cfg.Name)
 	}
 	cctx, cancel := context.WithTimeout(ctx, u.cfg.callTimeout())
@@ -574,7 +596,7 @@ func (u *upstream) handlePrompt(ctx context.Context, req *mcp.GetPromptRequest) 
 		Name:      req.Params.Name,
 		Arguments: req.Params.Arguments,
 	})
-	u.logCall("prompt", req.Params.Name, start, err == nil, errText(err))
+	u.logCall(ctx, "prompt", req.Params.Name, start, err == nil, errText(err))
 	return res, err
 }
 
@@ -582,13 +604,13 @@ func (u *upstream) handleResource(ctx context.Context, req *mcp.ReadResourceRequ
 	start := time.Now()
 	s := u.currentSession()
 	if s == nil {
-		u.logCall("resource", req.Params.URI, start, false, "upstream unavailable")
+		u.logCall(ctx, "resource", req.Params.URI, start, false, "upstream unavailable")
 		return nil, fmt.Errorf("upstream %q is unavailable", u.cfg.Name)
 	}
 	cctx, cancel := context.WithTimeout(ctx, u.cfg.callTimeout())
 	defer cancel()
 	res, err := s.ReadResource(cctx, &mcp.ReadResourceParams{URI: req.Params.URI})
-	u.logCall("resource", req.Params.URI, start, err == nil, errText(err))
+	u.logCall(ctx, "resource", req.Params.URI, start, err == nil, errText(err))
 	return res, err
 }
 

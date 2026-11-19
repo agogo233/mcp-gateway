@@ -795,7 +795,11 @@ func TestConfigValidation(t *testing.T) {
 // authTestConfig returns a config with bearer auth enabled.
 func authTestConfig(url string, tokens ...string) *Config {
 	cfg := testConfig(url)
-	cfg.Auth = &AuthConfig{Tokens: tokens}
+	clients := make([]AuthClient, len(tokens))
+	for i, tok := range tokens {
+		clients[i] = AuthClient{Token: tok}
+	}
+	cfg.Auth = &AuthConfig{Tokens: clients}
 	return cfg
 }
 
@@ -1105,12 +1109,22 @@ func TestAggregatePrefixConflictRouting(t *testing.T) {
 	if err != nil || len(tools.Tools) != 1 || tools.Tools[0].Name != "a_b_c" {
 		t.Fatalf("aggregate tools: %v %+v", err, tools)
 	}
-	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "a_b_c"})
-	if err != nil || res.IsError {
-		t.Fatalf("call a_b_c: %v %+v", err, res)
-	}
-	tc, ok := res.Content[0].(*mcp.TextContent)
-	if !ok || tc.Text != "from:a:b_c" {
-		t.Fatalf("a_b_c must route to its owner upstream a, got %+v", res.Content)
+	// The exposed name can already be listed while a later-syncing upstream's
+	// ownership has not been mirrored yet; poll until the call routes to the
+	// name-sorted owner ("a") instead of the longest-prefix fallback.
+	var res *mcp.CallToolResult
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var err error
+		res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "a_b_c"})
+		if err == nil && !res.IsError {
+			if tc, ok := res.Content[0].(*mcp.TextContent); ok && tc.Text == "from:a:b_c" {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a_b_c must route to its owner upstream a, last err=%v res=%+v", err, res)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }

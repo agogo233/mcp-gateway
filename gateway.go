@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -15,18 +15,23 @@ import (
 )
 
 // gateway owns the upstreams and the HTTP surface: one MCP endpoint per
-// upstream (/mcp/<name>), an optional aggregate endpoint (/mcp/<aggregate>)
-// and a /healthz status endpoint. The upstream set can change at runtime via
-// applyConfig (hot reload), so routing is resolved per request.
+// upstream (/mcp/<name>), an optional aggregate endpoint (/mcp/<aggregate>),
+// a /healthz status endpoint and the embedded management console (/ and
+// /api/*). The upstream set can change at runtime via applyConfig (hot
+// reload), so routing is resolved per request.
 type gateway struct {
-	version   string
-	startTime time.Time
-	rootCtx   context.Context
+	version    string
+	startTime  time.Time
+	rootCtx    context.Context
+	configPath string // location of gateway.json, used by reload and console saves
 
 	cfg atomic.Pointer[Config]
 
 	// reloadMu serializes configuration reloads.
 	reloadMu sync.Mutex
+
+	// logs is the in-memory activity timeline shown in the console.
+	logs *recentLog
 
 	mu        sync.RWMutex
 	upstreams map[string]*upstream
@@ -42,6 +47,7 @@ func newGateway(cfg *Config, version string) *gateway {
 		version:   version,
 		startTime: time.Now(),
 		upstreams: make(map[string]*upstream, len(cfg.Upstreams)),
+		logs:      newRecentLog(),
 	}
 	g.cfg.Store(cfg)
 	if cfg.Aggregate != "" {
@@ -197,17 +203,32 @@ func (g *gateway) applyConfig(cfg *Config) {
 		g.rebuildAggregate(cfg.Aggregate)
 	}
 	log.Printf("config reloaded: %d upstream(s), aggregate=%q", len(cfg.Upstreams), cfg.Aggregate)
+	g.logs.add(logEntry{
+		Time:   time.Now(),
+		Kind:   "event",
+		Event:  "reload",
+		Detail: truncate(fmt.Sprintf("%d upstream(s), aggregate=%q", len(cfg.Upstreams), cfg.Aggregate), maxDetailLen),
+	})
 }
 
-// reloadFrom loads and validates a config file and applies it; on any error
-// the current configuration is kept.
+// reloadFrom loads and applies a config file, keeping the current
+// configuration on any error.
 func (g *gateway) reloadFrom(path string) {
+	if err := g.reloadFromFile(path); err != nil {
+		log.Printf("config reload skipped, keeping current config: %v", err)
+	}
+}
+
+// reloadFromFile loads and validates a config file and applies it, returning
+// the validation error (if any) so callers such as the console API can report
+// it. On error the current configuration is kept.
+func (g *gateway) reloadFromFile(path string) error {
 	cfg, err := loadConfig(path)
 	if err != nil {
-		log.Printf("config reload skipped, keeping current config: %v", err)
-		return
+		return err
 	}
 	g.applyConfig(cfg)
+	return nil
 }
 
 func (g *gateway) rebuildAggregate(name string) {
@@ -258,62 +279,131 @@ func (g *gateway) handler() http.Handler {
 	return http.HandlerFunc(g.serveHTTP)
 }
 
-// authorize enforces the optional gateway-level bearer auth (config "auth").
-// /healthz always answers, but only authorized callers get the detailed
-// health document. Comparison is constant-time over SHA-256 digests so
-// response timing does not leak token content or length.
-func (g *gateway) authorize(r *http.Request) bool {
-	cfg := g.config()
-	if !cfg.authEnabled() {
-		return true
-	}
+// bearerToken extracts the raw bearer token from the Authorization header.
+func bearerToken(r *http.Request) string {
 	const prefix = "Bearer "
 	auth := r.Header.Get("Authorization")
 	if len(auth) <= len(prefix) || !strings.EqualFold(auth[:len(prefix)], prefix) {
-		return false
+		return ""
 	}
-	sum := sha256.Sum256([]byte(auth[len(prefix):]))
-	for _, want := range cfg.tokenHashes() {
-		if subtle.ConstantTimeCompare(sum[:], want[:]) == 1 {
-			return true
-		}
+	return auth[len(prefix):]
+}
+
+// authorizeAuth enforces the downstream credential list (config "auth") that
+// guards /mcp/* endpoints. When auth is not configured every caller is
+// accepted with an empty principal.
+func (g *gateway) authorizeAuth(r *http.Request) (principal, bool) {
+	cfg := g.config()
+	if !cfg.authEnabled() {
+		return principal{}, true
 	}
-	return false
+	if p, ok := cfg.Auth.match(bearerToken(r)); ok {
+		return p, true
+	}
+	return principal{}, false
+}
+
+// principalInfo carries the authenticated identity and client IP through the
+// MCP handler chain so forwarded calls can be attributed in the console log.
+type principalInfo struct {
+	principal principal
+	srcIP     string
+}
+
+type ctxKey int
+
+const principalKey ctxKey = 1
+
+// withPrincipal attaches the authenticated identity to the request context.
+func withPrincipal(r *http.Request, p principal, srcIP string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), principalKey, principalInfo{principal: p, srcIP: srcIP}))
+}
+
+// requestPrincipal returns the identity attached by withPrincipal, if any.
+func requestPrincipal(ctx context.Context) (principal, string) {
+	if v, ok := ctx.Value(principalKey).(principalInfo); ok {
+		return v.principal, v.srcIP
+	}
+	return principal{}, ""
+}
+
+// clientIP extracts the bare IP (no port) from the request's remote address.
+func clientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 func (g *gateway) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	// Inline styles are used by the console markup; scripts stay same-origin
+	// only (no inline script exists).
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'")
+
 	if r.URL.Path == "/healthz" {
 		g.handleHealth(w, r)
 		return
 	}
-	if !g.authorize(r) {
-		log.Printf("auth: reject %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
-		w.Header().Set("WWW-Authenticate", `Bearer realm="mcp-gateway"`)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		g.serveAPI(w, r)
 		return
 	}
-	if rest, ok := strings.CutPrefix(r.URL.Path, "/mcp/"); ok {
-		g.mu.RLock()
-		u := g.upstreams[rest]
-		var agg *aggregate
-		if u == nil && g.aggregate != nil && rest == g.aggregate.name {
-			agg = g.aggregate
-		}
-		g.mu.RUnlock()
-		if u != nil {
-			u.handler.ServeHTTP(w, r)
+	// Console static assets are served without authentication: the page
+	// itself contains no secrets, all data comes from authenticated /api/*
+	// calls. Unknown paths fall through to auth/404 handling below.
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		if r.URL.Path == "/" || staticExists(strings.TrimPrefix(r.URL.Path, "/")) {
+			g.serveStatic(w, r)
 			return
 		}
-		if agg != nil {
-			agg.handler.ServeHTTP(w, r)
+	}
+	if p, ok := g.authorizeAuth(r); ok {
+		if rest, has := strings.CutPrefix(r.URL.Path, "/mcp/"); has {
+			g.serveMCP(w, withPrincipal(r, p, clientIP(r)), rest)
 			return
 		}
+		http.NotFound(w, r)
+		return
+	}
+	log.Printf("auth: reject %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+	w.Header().Set("WWW-Authenticate", `Bearer realm="mcp-gateway"`)
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+}
+
+// serveMCP routes /mcp/<name> to the matching upstream (or aggregate)
+// handler. Routing is resolved per request because the upstream set can
+// change via hot reload.
+func (g *gateway) serveMCP(w http.ResponseWriter, r *http.Request, rest string) {
+	g.mu.RLock()
+	u := g.upstreams[rest]
+	var agg *aggregate
+	if u == nil && g.aggregate != nil && rest == g.aggregate.name {
+		agg = g.aggregate
+	}
+	g.mu.RUnlock()
+	if u != nil {
+		u.handler.ServeHTTP(w, r)
+		return
+	}
+	if agg != nil {
+		agg.handler.ServeHTTP(w, r)
+		return
 	}
 	http.NotFound(w, r)
 }
 
 func (g *gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	_, authorized := g.authorizeAuth(r)
+	_ = json.NewEncoder(w).Encode(g.healthDocument(authorized))
+}
+
+// healthDocument assembles the health status. Unauthenticated callers get a
+// liveness-only answer: the process is up, but internal topology (upstream
+// URLs, failure counters, versions) is not disclosed.
+func (g *gateway) healthDocument(authorized bool) healthResponse {
 	health := healthResponse{
 		Status:    "ok",
 		Version:   g.version,
@@ -321,16 +411,8 @@ func (g *gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Time:      time.Now().UTC().Format(time.RFC3339),
 		Upstreams: []upstreamHealth{},
 	}
-	if !g.authorize(r) {
-		// Unauthenticated callers (container healthchecks, port scanners) get
-		// a liveness-only answer: the process is up, but internal topology
-		// (upstream URLs, failure counters, versions) is not disclosed.
-		_ = json.NewEncoder(w).Encode(healthResponse{
-			Status: health.Status,
-			Uptime: health.Uptime,
-			Time:   health.Time,
-		})
-		return
+	if !authorized {
+		return healthResponse{Status: health.Status, Uptime: health.Uptime, Time: health.Time}
 	}
 	g.mu.RLock()
 	agg := g.aggregate
@@ -342,7 +424,7 @@ func (g *gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 	for _, u := range g.allUpstreams() {
 		health.Upstreams = append(health.Upstreams, u.health())
 	}
-	_ = json.NewEncoder(w).Encode(health)
+	return health
 }
 
 type healthResponse struct {
