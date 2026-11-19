@@ -1226,3 +1226,147 @@ func TestShutdownRacesWithReload(t *testing.T) {
 		t.Fatal("background loops did not exit after shutdown")
 	}
 }
+
+// TestNewProtocolUpstreamProbe reproduces the go-github-mcp outage: servers
+// implementing the 2026-07-28 MCP revision (SEP-2575) removed the ping
+// method and reject it at the transport layer with 400 before dispatch. The
+// gateway must probe such upstreams with a request the negotiated protocol
+// still supports (tools/list), otherwise the upstream flaps down.
+func TestNewProtocolUpstreamProbe(t *testing.T) {
+	strict := newStrictNewProtocolUpstream(t)
+
+	gw := startGateway(t, testConfig(strict.ts.URL))
+	waitForState(t, gw.URL+"/healthz", "test", "up", 5*time.Second)
+
+	// The broken probe makes the upstream flap: the session connects (up),
+	// the next ping is rejected twice, the upstream is marked down and
+	// reconnected — over and over. Assert it stays continuously up.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(gw.URL + "/healthz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var h healthResponse
+		err = json.NewDecoder(resp.Body).Decode(&h)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, u := range h.Upstreams {
+			if u.State != "up" || u.Failures != 0 {
+				t.Fatalf("upstream %q flapped: state=%s failures=%d (ping probe rejected by the new-protocol transport)", u.Name, u.State, u.Failures)
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	if strict.pings.Load() != 0 {
+		t.Fatalf("gateway must not send ping to a 2026-07-28 upstream, got %d pings", strict.pings.Load())
+	}
+	if strict.toolLists.Load() == 0 {
+		t.Fatal("gateway never probed with tools/list")
+	}
+
+	cs := connectClient(t, gw.URL+"/mcp/test")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tools, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools through gateway: %v", err)
+	}
+	if len(tools.Tools) != 1 || tools.Tools[0].Name != "echo" {
+		t.Fatalf("expected the mirrored echo tool, got %+v", tools.Tools)
+	}
+}
+
+// strictNewProtocolUpstream is a minimal hand-rolled MCP server speaking the
+// 2026-07-28 revision (SEP-2575): ping is transport-rejected, every request
+// must carry the _meta protocol-version stamp, and the legacy initialize
+// handshake negotiates that version — the same behavior that makes
+// go-github-mcp reject the gateway's old ping probe.
+type strictNewProtocolUpstream struct {
+	ts        *httptest.Server
+	pings     atomic.Int32
+	toolLists atomic.Int32
+}
+
+func newStrictNewProtocolUpstream(t *testing.T) *strictNewProtocolUpstream {
+	t.Helper()
+	s := &strictNewProtocolUpstream{}
+	reject := func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"error":{"code":-32602,"message":"missing or invalid _meta field io.modelcontextprotocol/protocolVersion"}}`))
+	}
+	s.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		var msg struct {
+			ID     any             `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.Unmarshal(body, &msg); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		switch {
+		case msg.Method == "ping":
+			s.pings.Add(1)
+			reject(w)
+		case msg.Method == "tools/list":
+			// The 2026-07-28 transport requires the _meta version stamp on
+			// every request; the SDK must supply it for the probe to pass.
+			var params struct {
+				Meta map[string]any `json:"_meta"`
+			}
+			_ = json.Unmarshal(msg.Params, &params)
+			if params.Meta["io.modelcontextprotocol/protocolVersion"] != mcpProtocolVersion20260728 {
+				reject(w)
+				return
+			}
+			s.toolLists.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": msg.ID,
+				"result": map[string]any{"tools": []map[string]any{{
+					"name":        "echo",
+					"description": "echoes its input",
+					"inputSchema": map[string]any{"type": "object"},
+				}}},
+			})
+		case msg.Method == "initialize":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": msg.ID,
+				"result": map[string]any{
+					"protocolVersion": mcpProtocolVersion20260728,
+					"capabilities":    map[string]any{"tools": map[string]any{}},
+					"serverInfo":      map[string]any{"name": "strict", "version": "0.0.1"},
+				},
+			})
+		case msg.ID == nil:
+			// Notifications expect no response body, just acceptance.
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			// Unknown request (e.g. server/discover): JSON-RPC method-not-
+			// found so the client falls back to the legacy initialize path,
+			// mirroring mark3labs behavior.
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": msg.ID,
+				"error": map[string]any{"code": -32601, "message": "method not found: " + msg.Method},
+			})
+		}
+	}))
+	t.Cleanup(s.ts.Close)
+	return s
+}

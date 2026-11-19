@@ -138,7 +138,7 @@ func (u *upstream) probeOnce(ctx context.Context) {
 	defer u.gw.kickAggregate()
 	if s := u.currentSession(); s != nil {
 		pctx, cancel := context.WithTimeout(ctx, u.gw.config().listTimeout())
-		err := s.Ping(pctx, &mcp.PingParams{})
+		err := u.livenessProbe(pctx, s)
 		cancel()
 		if err == nil {
 			u.recordSuccess()
@@ -160,6 +160,39 @@ func (u *upstream) probeOnce(ctx context.Context) {
 	u.setSession(s)
 	u.recordSuccess()
 	u.syncCatalog(ctx, s)
+}
+
+// mcpProtocolVersion20260728 is the protocol revision (SEP-2575) that removed
+// the ping method and made liveness a transport concern. Mirrors go-sdk's
+// usesNewProtocol threshold.
+const mcpProtocolVersion20260728 = "2026-07-28"
+
+// livenessProbe sends a cheap request the upstream's negotiated protocol
+// still supports. The 2026-07-28 revision removed ping and strict transports
+// (e.g. mark3labs/mcp-go based servers such as go-github-mcp) reject it with
+// 400 before dispatch; go-sdk v1.8.0's Ping also omits the mandatory _meta
+// protocol-version stamp. Probe with the first catalog list the server
+// declares a capability for instead. A session that declares no capabilities
+// at all is treated as alive (the initialize handshake succeeded and
+// syncCatalog re-checks the sections on every probe).
+func (u *upstream) livenessProbe(ctx context.Context, s *mcp.ClientSession) error {
+	if res := s.InitializeResult(); res != nil && res.ProtocolVersion >= mcpProtocolVersion20260728 {
+		caps := res.Capabilities
+		switch {
+		case caps != nil && caps.Tools != nil:
+			_, err := s.ListTools(ctx, &mcp.ListToolsParams{})
+			return err
+		case caps != nil && caps.Prompts != nil:
+			_, err := s.ListPrompts(ctx, &mcp.ListPromptsParams{})
+			return err
+		case caps != nil && caps.Resources != nil:
+			_, err := s.ListResources(ctx, &mcp.ListResourcesParams{})
+			return err
+		default:
+			return nil
+		}
+	}
+	return s.Ping(ctx, &mcp.PingParams{})
 }
 
 func (u *upstream) connect(ctx context.Context) (*mcp.ClientSession, error) {
