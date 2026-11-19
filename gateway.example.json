@@ -1,6 +1,8 @@
 {
   "listen": ":9200",
   "probeIntervalMs": 15000,
+  "maxProbeIntervalMs": 300000,
+  "autoDisableAfter": 10,
   "connectTimeoutMs": 3000,
   "listTimeoutMs": 3000,
   "failureThreshold": 2,
@@ -34,6 +36,7 @@
       "name": "github",
       "url": "http://github-mcp:8080/mcp",
       "callTimeoutMs": 120000,
+      "probeIntervalMs": 60000,
       "headers": {
         "Authorization": "Bearer <github-mcp-auth-token>",
         "X-Client-Name": "mcp-gateway"

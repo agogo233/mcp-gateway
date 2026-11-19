@@ -210,6 +210,7 @@ function renderUpstreamCards(ups) {
     '<div class="row"><div class="field" style="flex:1"><label>name</label><input type="text" class="up-name" value="' + esc(u.name) + '"></div>' +
     '<div class="field" style="flex:2"><label>url</label><input type="text" class="up-url" value="' + esc(u.url) + '"></div></div>' +
     '<div class="row"><div class="field" style="flex:1"><label>callTimeoutMs</label><input type="number" class="up-timeout" value="' + esc(u.callTimeoutMs || '') + '" placeholder="60000"></div>' +
+    '<div class="field" style="flex:1"><label>probeIntervalMs（留空=全局）</label><input type="number" class="up-probe" value="' + esc(u.probeIntervalMs || '') + '" placeholder="15000"></div>' +
     '<div class="field" style="flex:2"><label>headers（每行一条 Key: ***；*** 表示保持不变）</label><textarea class="up-headers" placeholder="Authorization: ***">' + esc(headerText(u.headers)) + '</textarea></div>' +
     '<label class="muted" style="flex:none;white-space:nowrap"><input type="checkbox" class="up-enabled" ' + (u.enabled !== false ? 'checked' : '') + '> 启用</label>' +
     '<button class="danger" data-action="del-upstream" data-i="' + i + '" type="button">删除</button></div></div>').join('');
@@ -226,6 +227,8 @@ async function loadConfig() {
   $('#cfgListen').value = cfg.listen || '';
   $('#cfgAggregate').value = cfg.aggregate || '';
   $('#cfgProbe').value = cfg.probeIntervalMs;
+  $('#cfgMaxProbe').value = cfg.maxProbeIntervalMs;
+  $('#cfgAutoDisable').value = cfg.autoDisableAfter;
   $('#cfgConnect').value = cfg.connectTimeoutMs;
   $('#cfgList').value = cfg.listTimeoutMs;
   $('#cfgFailure').value = cfg.failureThreshold;
@@ -242,6 +245,8 @@ function collectConfig() {
     listen: $('#cfgListen').value.trim(),
     aggregate: $('#cfgAggregate').value.trim(),
     probeIntervalMs: num('#cfgProbe'),
+    maxProbeIntervalMs: num('#cfgMaxProbe'),
+    autoDisableAfter: num('#cfgAutoDisable'),
     connectTimeoutMs: num('#cfgConnect'),
     listTimeoutMs: num('#cfgList'),
     failureThreshold: num('#cfgFailure'),
@@ -262,6 +267,7 @@ function collectConfig() {
       name: card.querySelector('.up-name').value.trim(),
       url: card.querySelector('.up-url').value.trim(),
       callTimeoutMs: parseInt(card.querySelector('.up-timeout').value, 10) || 0,
+      probeIntervalMs: parseInt(card.querySelector('.up-probe').value, 10) || 0,
       enabled: card.querySelector('.up-enabled').checked,
       headers
     });

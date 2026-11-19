@@ -54,6 +54,8 @@
 
 - `listen`：监听地址，默认 `:9200`
 - `probeIntervalMs`：探测周期，默认 15000
+- `maxProbeIntervalMs`：探活退避封顶，默认 300000（5 分钟）。上游 down 后，探测间隔按连续失败次数翻倍（15s→30s→…），到此封顶，避免对持续故障的上游无谓空转；探测成功立即复位
+- `autoDisableAfter`：连续失败自动熔断阈值，默认 0（关闭）。达到次数后上游进入"已自动禁用"（quarantined）运行态：完全停止探测，直至通过控制台"启用"按钮、修改该上游配置或重启进程恢复；该状态只存在于内存，不写回 gateway.json
 - `connectTimeoutMs`：与上游 initialize 握手超时，默认 3000
 - `listTimeoutMs`：单次 ping/列举请求超时，默认 3000
 - `failureThreshold`：连续失败阈值，默认 2
@@ -63,6 +65,8 @@
 - `auth.tokens`：网关接入鉴权的 Bearer token 列表（可选，见下文"鉴权"）
 - `console.tokens`：管理控制台（`/api/*`）专用 Bearer token 列表（可选，见下文"管理控制台"）
 - `upstreams[].callTimeoutMs`：单次调用超时，默认 60000
+- `upstreams[].probeIntervalMs`：该上游的探测周期覆盖（如目录较重的上游可放慢），留空用全局值
+- `upstreams[].enabled`：该上游启停，缺省 true；false 时停止探测、目录与聚合端点剔除、`/mcp/<name>` 404
 - `upstreams[].headers`：发往上游的附加头（如 Bearer token）
 
 上游名不得含 `/` 或 `##`，不得与 `aggregate` 同名。
@@ -132,9 +136,9 @@ healthcheck 使用；携带有效 token 访问 `/healthz` 才返回含上游 URL
 网关内嵌中文管理控制台（纯静态单页，`go:embed` 打包进二进制，无额外依赖）：
 
 - 浏览器打开 `http://<网关地址>:9200/` 即可使用；
-- **健康总览**：进程状态、各上游 up/down、失败计数、最近错误、目录条数、聚合端点；
-- **工具目录**：按上游浏览 tools/prompts/resources 及其 schema（本地镜像，分页 + 名称过滤）；
-- **配置管理**：结构化表单编辑全局参数、上游（增删改、headers）、auth/console 令牌；保存后校验并**原子写回 gateway.json**，随即热更新生效（也可取消勾选写盘，仅内存生效）；
+- **健康总览**：进程状态、各上游 up/down/已停用/已自动禁用、失败计数、最近错误、目录条数、聚合端点；每个上游带**启停按钮**（调用 `/api/upstream/toggle`，写回 gateway.json 并热更新生效）；
+- **工具目录**：按上游浏览 tools/prompts/resources 及其 schema（本地镜像，分页 + 名称过滤，仅启用的上游）；
+- **配置管理**：结构化表单编辑全局参数、上游（增删改、headers、启停、探活频率）、auth/console 令牌；保存后校验并**原子写回 gateway.json**，随即热更新生效（也可取消勾选写盘，仅内存生效）；
 - **最近活动**：内存环形缓冲（最近 500 条，重启清空）的调用与状态事件时间线，含调用方 token 归因、来源 IP、成败与耗时；不记录调用参数。
 
 访问控制与安全边界：

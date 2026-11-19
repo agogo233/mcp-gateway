@@ -68,6 +68,10 @@
             <div class="field" style="flex:1"><label>listTimeoutMs</label><input type="number" id="cfgList"></div>
             <div class="field" style="flex:1"><label>failureThreshold</label><input type="number" id="cfgFailure"></div>
           </div>
+          <div class="row">
+            <div class="field" style="flex:1"><label>maxProbeIntervalMs（退避封顶）</label><input type="number" id="cfgMaxProbe"></div>
+            <div class="field" style="flex:1"><label>autoDisableAfter（连续失败熔断，0=关闭）</label><input type="number" id="cfgAutoDisable"></div>
+          </div>
         </div>
 
         <h2>下游接入令牌 <span class="tag">auth.tokens · 命名</span></h2>

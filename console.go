@@ -215,25 +215,28 @@ type authView struct {
 }
 
 type upstreamView struct {
-	Name          string            `json:"name"`
-	URL           string            `json:"url"`
-	CallTimeoutMs int               `json:"callTimeoutMs,omitempty"`
-	Headers       map[string]string `json:"headers,omitempty"`
-	Enabled       bool              `json:"enabled"`
+	Name            string            `json:"name"`
+	URL             string            `json:"url"`
+	CallTimeoutMs   int               `json:"callTimeoutMs,omitempty"`
+	ProbeIntervalMs int               `json:"probeIntervalMs,omitempty"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	Enabled         bool              `json:"enabled"`
 }
 
 type configView struct {
-	Listen            string         `json:"listen"`
-	ProbeIntervalMs   int            `json:"probeIntervalMs"`
-	ConnectTimeoutMs  int            `json:"connectTimeoutMs"`
-	ListTimeoutMs     int            `json:"listTimeoutMs"`
-	FailureThreshold  int            `json:"failureThreshold"`
-	ShutdownTimeoutMs int            `json:"shutdownTimeoutMs"`
-	Aggregate         string         `json:"aggregate,omitempty"`
-	WatchConfig       bool           `json:"watchConfig"`
-	Auth              *authView      `json:"auth,omitempty"`
-	Console           *authView      `json:"console,omitempty"`
-	Upstreams         []upstreamView `json:"upstreams"`
+	Listen             string         `json:"listen"`
+	ProbeIntervalMs    int            `json:"probeIntervalMs"`
+	MaxProbeIntervalMs int            `json:"maxProbeIntervalMs"`
+	AutoDisableAfter   int            `json:"autoDisableAfter"`
+	ConnectTimeoutMs   int            `json:"connectTimeoutMs"`
+	ListTimeoutMs      int            `json:"listTimeoutMs"`
+	FailureThreshold   int            `json:"failureThreshold"`
+	ShutdownTimeoutMs  int            `json:"shutdownTimeoutMs"`
+	Aggregate          string         `json:"aggregate,omitempty"`
+	WatchConfig        bool           `json:"watchConfig"`
+	Auth               *authView      `json:"auth,omitempty"`
+	Console            *authView      `json:"console,omitempty"`
+	Upstreams          []upstreamView `json:"upstreams"`
 }
 
 func authViewOf(a *AuthConfig) *authView {
@@ -253,20 +256,22 @@ func authViewOf(a *AuthConfig) *authView {
 func (g *gateway) handleAPIConfigGet(w http.ResponseWriter, r *http.Request) {
 	cfg := g.config()
 	view := configView{
-		Listen:            cfg.Listen,
-		ProbeIntervalMs:   cfg.ProbeIntervalMs,
-		ConnectTimeoutMs:  cfg.ConnectTimeoutMs,
-		ListTimeoutMs:     cfg.ListTimeoutMs,
-		FailureThreshold:  cfg.FailureThreshold,
-		ShutdownTimeoutMs: cfg.ShutdownTimeoutMs,
-		Aggregate:         cfg.Aggregate,
-		WatchConfig:       cfg.watchEnabled(),
-		Auth:              authViewOf(cfg.Auth),
-		Console:           authViewOf(cfg.Console),
-		Upstreams:         []upstreamView{},
+		Listen:             cfg.Listen,
+		ProbeIntervalMs:    cfg.ProbeIntervalMs,
+		MaxProbeIntervalMs: cfg.MaxProbeIntervalMs,
+		AutoDisableAfter:   cfg.AutoDisableAfter,
+		ConnectTimeoutMs:   cfg.ConnectTimeoutMs,
+		ListTimeoutMs:      cfg.ListTimeoutMs,
+		FailureThreshold:   cfg.FailureThreshold,
+		ShutdownTimeoutMs:  cfg.ShutdownTimeoutMs,
+		Aggregate:          cfg.Aggregate,
+		WatchConfig:        cfg.watchEnabled(),
+		Auth:               authViewOf(cfg.Auth),
+		Console:            authViewOf(cfg.Console),
+		Upstreams:          []upstreamView{},
 	}
 	for _, u := range cfg.Upstreams {
-		uv := upstreamView{Name: u.Name, URL: u.URL, CallTimeoutMs: u.CallTimeoutMs, Enabled: u.isEnabled()}
+		uv := upstreamView{Name: u.Name, URL: u.URL, CallTimeoutMs: u.CallTimeoutMs, ProbeIntervalMs: u.ProbeIntervalMs, Enabled: u.isEnabled()}
 		if len(u.Headers) > 0 {
 			uv.Headers = make(map[string]string, len(u.Headers))
 			for k := range u.Headers {
@@ -288,14 +293,16 @@ type tokenEdit struct {
 }
 
 type configEdit struct {
-	Listen            *string `json:"listen"`
-	ProbeIntervalMs   *int    `json:"probeIntervalMs"`
-	ConnectTimeoutMs  *int    `json:"connectTimeoutMs"`
-	ListTimeoutMs     *int    `json:"listTimeoutMs"`
-	FailureThreshold  *int    `json:"failureThreshold"`
-	ShutdownTimeoutMs *int    `json:"shutdownTimeoutMs"`
-	Aggregate         *string `json:"aggregate"`
-	WatchConfig       *bool   `json:"watchConfig"`
+	Listen             *string `json:"listen"`
+	ProbeIntervalMs    *int    `json:"probeIntervalMs"`
+	MaxProbeIntervalMs *int    `json:"maxProbeIntervalMs"`
+	AutoDisableAfter   *int    `json:"autoDisableAfter"`
+	ConnectTimeoutMs   *int    `json:"connectTimeoutMs"`
+	ListTimeoutMs      *int    `json:"listTimeoutMs"`
+	FailureThreshold   *int    `json:"failureThreshold"`
+	ShutdownTimeoutMs  *int    `json:"shutdownTimeoutMs"`
+	Aggregate          *string `json:"aggregate"`
+	WatchConfig        *bool   `json:"watchConfig"`
 	// AuthRaw / ConsoleRaw distinguish "absent" (nil: keep current),
 	// "null" (delete the section) and an object with a tokens list.
 	AuthRaw    *json.RawMessage `json:"auth"`
@@ -308,6 +315,9 @@ type upstreamEdit struct {
 	URL           string            `json:"url"`
 	CallTimeoutMs int               `json:"callTimeoutMs,omitempty"`
 	Headers       map[string]string `json:"headers,omitempty"`
+	// ProbeIntervalMs nil keeps the current per-upstream override (or the
+	// global interval for new upstreams).
+	ProbeIntervalMs *int `json:"probeIntervalMs,omitempty"`
 	// Enabled nil keeps the current state (or defaults to enabled for new
 	// upstreams); true/false sets it explicitly.
 	Enabled *bool `json:"enabled,omitempty"`
@@ -357,23 +367,31 @@ func (g *gateway) handleAPIConfigPut(w http.ResponseWriter, r *http.Request) {
 // redacted placeholders, validates the result and derives reload warnings.
 func buildEditedConfig(cur *Config, e *configEdit) (*Config, []string, error) {
 	nc := &Config{
-		Listen:            cur.Listen,
-		ProbeIntervalMs:   cur.ProbeIntervalMs,
-		ConnectTimeoutMs:  cur.ConnectTimeoutMs,
-		ListTimeoutMs:     cur.ListTimeoutMs,
-		FailureThreshold:  cur.FailureThreshold,
-		ShutdownTimeoutMs: cur.ShutdownTimeoutMs,
-		Aggregate:         cur.Aggregate,
-		WatchConfig:       cur.WatchConfig,
-		Auth:              cloneAuth(cur.Auth),
-		Console:           cloneAuth(cur.Console),
-		Upstreams:         cloneUpstreams(cur.Upstreams),
+		Listen:             cur.Listen,
+		ProbeIntervalMs:    cur.ProbeIntervalMs,
+		MaxProbeIntervalMs: cur.MaxProbeIntervalMs,
+		AutoDisableAfter:   cur.AutoDisableAfter,
+		ConnectTimeoutMs:   cur.ConnectTimeoutMs,
+		ListTimeoutMs:      cur.ListTimeoutMs,
+		FailureThreshold:   cur.FailureThreshold,
+		ShutdownTimeoutMs:  cur.ShutdownTimeoutMs,
+		Aggregate:          cur.Aggregate,
+		WatchConfig:        cur.WatchConfig,
+		Auth:               cloneAuth(cur.Auth),
+		Console:            cloneAuth(cur.Console),
+		Upstreams:          cloneUpstreams(cur.Upstreams),
 	}
 	if e.Listen != nil {
 		nc.Listen = *e.Listen
 	}
 	if e.ProbeIntervalMs != nil {
 		nc.ProbeIntervalMs = *e.ProbeIntervalMs
+	}
+	if e.MaxProbeIntervalMs != nil {
+		nc.MaxProbeIntervalMs = *e.MaxProbeIntervalMs
+	}
+	if e.AutoDisableAfter != nil {
+		nc.AutoDisableAfter = *e.AutoDisableAfter
 	}
 	if e.ConnectTimeoutMs != nil {
 		nc.ConnectTimeoutMs = *e.ConnectTimeoutMs
@@ -413,6 +431,12 @@ func buildEditedConfig(cur *Config, e *configEdit) (*Config, []string, error) {
 		ups := make([]UpstreamConfig, 0, len(e.Upstreams))
 		for _, ue := range e.Upstreams {
 			uc := UpstreamConfig{Name: ue.Name, URL: ue.URL, CallTimeoutMs: ue.CallTimeoutMs}
+			if ue.ProbeIntervalMs != nil {
+				uc.ProbeIntervalMs = *ue.ProbeIntervalMs
+			} else if prev, ok := findUpstream(cur.Upstreams, ue.Name); ok {
+				// Omitted override keeps the upstream's current value.
+				uc.ProbeIntervalMs = prev.ProbeIntervalMs
+			}
 			if ue.Enabled != nil {
 				uc.Enabled = ue.Enabled
 			} else if prev, ok := findUpstream(cur.Upstreams, ue.Name); ok {
@@ -647,6 +671,14 @@ func (g *gateway) handleAPIUpstreamToggle(w http.ResponseWriter, r *http.Request
 		return
 	}
 	g.applyConfig(&nc)
+	// Re-enabling must also clear a runtime quarantine: equal() treats nil
+	// and true as the same enabled state, so no rebuild happens and the old
+	// runner (with its stopped ticker) would keep sitting idle.
+	if *req.Enabled {
+		if u := g.upstream(req.Name); u != nil {
+			u.resume()
+		}
+	}
 	g.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": req.Name, "enabled": *req.Enabled})
 }
 

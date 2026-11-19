@@ -26,10 +26,23 @@ type UpstreamConfig struct {
 	// Headers are sent with every request made to this upstream
 	// (e.g. {"Authorization": "Bearer ..."}).
 	Headers map[string]string `json:"headers,omitempty"`
+	// ProbeIntervalMs overrides the global probe interval for this upstream
+	// (e.g. heavier catalogs can be probed less often). Zero means the
+	// global probeIntervalMs applies.
+	ProbeIntervalMs int `json:"probeIntervalMs,omitempty"`
 	// Enabled gates this upstream on/off. Nil or true means enabled; false
 	// stops the probe loop, drops the session and excludes the upstream from
 	// the per-upstream and aggregate endpoints until re-enabled.
 	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// probeInterval resolves this upstream's effective base probe interval given
+// the global one.
+func (u UpstreamConfig) probeInterval(global time.Duration) time.Duration {
+	if u.ProbeIntervalMs <= 0 {
+		return global
+	}
+	return time.Duration(u.ProbeIntervalMs) * time.Millisecond
 }
 
 // isEnabled reports whether the upstream should be served. Absent (nil) and
@@ -44,7 +57,7 @@ func enabledPtr(v bool) *bool { return &v }
 // equal reports whether two upstream configs are semantically identical;
 // used by hot reload to decide between keep and rebuild.
 func (u UpstreamConfig) equal(o UpstreamConfig) bool {
-	if u.Name != o.Name || u.URL != o.URL || u.CallTimeoutMs != o.CallTimeoutMs || len(u.Headers) != len(o.Headers) {
+	if u.Name != o.Name || u.URL != o.URL || u.CallTimeoutMs != o.CallTimeoutMs || u.ProbeIntervalMs != o.ProbeIntervalMs || len(u.Headers) != len(o.Headers) {
 		return false
 	}
 	if u.isEnabled() != o.isEnabled() {
@@ -154,6 +167,17 @@ type Config struct {
 	// FailureThreshold is the number of consecutive failed probes before an
 	// upstream is marked down and its session is retired.
 	FailureThreshold int `json:"failureThreshold,omitempty"`
+	// MaxProbeIntervalMs caps the exponential probe backoff: once an upstream
+	// is down, the probe interval doubles per additional failure up to this
+	// ceiling. Zero means 300000 (5 minutes).
+	MaxProbeIntervalMs int `json:"maxProbeIntervalMs,omitempty"`
+	// AutoDisableAfter quarantines an upstream after this many consecutive
+	// failed probes: probing pauses entirely until it is re-enabled via the
+	// console, its config changes or the process restarts. Zero (default)
+	// disables quarantining; when set it is clamped to at least
+	// FailureThreshold. The state is runtime-only and never written to the
+	// config file.
+	AutoDisableAfter int `json:"autoDisableAfter,omitempty"`
 	// ShutdownTimeoutMs bounds graceful shutdown: draining HTTP connections
 	// and waiting for background loops to exit. Zero means 5000.
 	ShutdownTimeoutMs int `json:"shutdownTimeoutMs,omitempty"`
@@ -177,12 +201,22 @@ type Config struct {
 
 var aggregateNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
+// defaultMaxProbeIntervalMs is the backoff ceiling applied when
+// maxProbeIntervalMs is not configured.
+const defaultMaxProbeIntervalMs = 300000
+
 func (c *Config) applyDefaults() {
 	if c.Listen == "" {
 		c.Listen = ":9200"
 	}
 	if c.ProbeIntervalMs <= 0 {
 		c.ProbeIntervalMs = 15000
+	}
+	if c.MaxProbeIntervalMs <= 0 {
+		c.MaxProbeIntervalMs = defaultMaxProbeIntervalMs
+	}
+	if c.AutoDisableAfter < 0 {
+		c.AutoDisableAfter = 0
 	}
 	if c.ConnectTimeoutMs <= 0 {
 		c.ConnectTimeoutMs = 3000
@@ -200,6 +234,23 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) probeInterval() time.Duration {
 	return time.Duration(c.ProbeIntervalMs) * time.Millisecond
+}
+
+func (c *Config) maxProbeInterval() time.Duration {
+	return time.Duration(c.MaxProbeIntervalMs) * time.Millisecond
+}
+
+// autoDisableLimit returns the effective quarantine threshold: zero when
+// disabled, otherwise at least the failure threshold so an upstream always
+// transitions to down before it can be quarantined.
+func (c *Config) autoDisableLimit() int {
+	if c.AutoDisableAfter <= 0 {
+		return 0
+	}
+	if c.AutoDisableAfter < c.FailureThreshold {
+		return c.FailureThreshold
+	}
+	return c.AutoDisableAfter
 }
 
 func (c *Config) connectTimeout() time.Duration {

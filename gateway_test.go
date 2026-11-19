@@ -26,6 +26,7 @@ type fakeUpstream struct {
 	gate     atomic.Bool
 	inner    http.Handler
 	lastAuth atomic.Value // last non-empty Authorization header seen
+	requests atomic.Int64 // total requests that reached the mux (incl. 503s)
 }
 
 func newFakeUpstream(t *testing.T, withPromptsAndResources bool) *fakeUpstream {
@@ -63,6 +64,7 @@ func newFakeUpstream(t *testing.T, withPromptsAndResources bool) *fakeUpstream {
 	f.inner = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		f.requests.Add(1)
 		if a := r.Header.Get("Authorization"); a != "" {
 			f.lastAuth.Store(a)
 		}
@@ -79,12 +81,13 @@ func newFakeUpstream(t *testing.T, withPromptsAndResources bool) *fakeUpstream {
 
 func testConfig(url string) *Config {
 	return &Config{
-		Listen:           ":0",
-		ProbeIntervalMs:  50,
-		ConnectTimeoutMs: 500,
-		ListTimeoutMs:    500,
-		FailureThreshold: 2,
-		Upstreams:        []UpstreamConfig{{Name: "test", URL: url}},
+		Listen:             ":0",
+		ProbeIntervalMs:    50,
+		MaxProbeIntervalMs: 100, // keep backoff from slowing recovery tests
+		ConnectTimeoutMs:   500,
+		ListTimeoutMs:      500,
+		FailureThreshold:   2,
+		Upstreams:          []UpstreamConfig{{Name: "test", URL: url}},
 	}
 }
 
@@ -1369,4 +1372,120 @@ func newStrictNewProtocolUpstream(t *testing.T) *strictNewProtocolUpstream {
 	}))
 	t.Cleanup(s.ts.Close)
 	return s
+}
+
+// TestProbeBackoffSchedule pins the exponential backoff arithmetic: the base
+// interval doubles per consecutive failure beyond the threshold, capped at
+// max, and resets while the failure count is within the threshold.
+func TestProbeBackoffSchedule(t *testing.T) {
+	base, max := 15*time.Second, time.Minute
+	threshold := 2
+	cases := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{0, base}, {1, base}, {2, base},
+		{3, 30 * time.Second},
+		{4, time.Minute},
+		{5, time.Minute},
+		{50, time.Minute},
+	}
+	for _, c := range cases {
+		if got := probeIntervalFor(base, c.failures, threshold, max); got != c.want {
+			t.Fatalf("failures=%d: got %v, want %v", c.failures, got, c.want)
+		}
+	}
+	// A base above the cap is clamped; a missing cap falls back to the
+	// default (reached once the doublings exceed it); a per-upstream override
+	// larger than the cap is clamped while healthy too.
+	if got := probeIntervalFor(2*max, 1, threshold, max); got != max {
+		t.Fatalf("base above cap: got %v, want %v", got, max)
+	}
+	if got := probeIntervalFor(base, 10, threshold, 0); got != defaultMaxProbeIntervalMs*time.Millisecond {
+		t.Fatalf("missing cap: got %v, want the default", got)
+	}
+	if got := probeIntervalFor(90*time.Second, 2, threshold, max); got != max {
+		t.Fatalf("base above cap while healthy: got %v, want %v", got, max)
+	}
+}
+
+// TestQuarantineStopsProbing verifies the auto-disable circuit breaker: after
+// autoDisableAfter consecutive failures the upstream stops being probed at
+// all, the health document reports it quarantined, and re-enabling it via the
+// console toggle rebuilds the runner, clearing the runtime quarantine.
+func TestQuarantineStopsProbing(t *testing.T) {
+	fake := newFakeUpstream(t, false)
+	fake.gate.Store(false) // upstream failing from the start
+	cfg := testConfig(fake.ts.URL)
+	cfg.ProbeIntervalMs = 10
+	cfg.MaxProbeIntervalMs = 20
+	cfg.FailureThreshold = 1
+	cfg.AutoDisableAfter = 3
+	cfg.Console = &AuthConfig{Tokens: []AuthClient{{Token: consoleToken}}}
+	path := filepath.Join(t.TempDir(), "gateway.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := newGateway(cfg, "test")
+	g.configPath = path
+	ctx, cancel := context.WithCancel(context.Background())
+	g.start(ctx)
+	ts := httptest.NewServer(g.handler())
+	t.Cleanup(func() {
+		ts.Close()
+		cancel()
+		g.wait()
+	})
+
+	// Wait until the circuit breaker opens.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var h healthResponse
+		resp, err := http.Get(ts.URL + "/healthz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = json.NewDecoder(resp.Body).Decode(&h)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		quarantined := false
+		for _, u := range h.Upstreams {
+			if u.Name == "test" && u.Quarantined {
+				quarantined = true
+			}
+		}
+		if quarantined {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("upstream was never quarantined")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// While quarantined the probe loop must be fully paused: no requests
+	// reach the (still broken) upstream.
+	c1 := fake.requests.Load()
+	time.Sleep(150 * time.Millisecond)
+	if c2 := fake.requests.Load(); c2 != c1 {
+		t.Fatalf("quarantined upstream still probed: %d -> %d requests", c1, c2)
+	}
+
+	// Recovery: heal the upstream, then re-enable via the console toggle.
+	// The toggle calls resume() on the runner, clearing the runtime
+	// quarantine and probing immediately.
+	fake.gate.Store(true)
+	if resp, body := toggleRequest(t, ts.URL, consoleToken, "test", true); resp.StatusCode != http.StatusOK {
+		t.Fatalf("toggle on: expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	waitForState(t, ts.URL+"/healthz", "test", "up", 5*time.Second)
+	if fake.requests.Load() <= c1 {
+		t.Fatal("probing did not resume after re-enable")
+	}
 }

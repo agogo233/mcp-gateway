@@ -56,11 +56,15 @@ type upstream struct {
 	// has fully exited (sessions closed). Both are managed by the gateway.
 	stop func()
 	done chan struct{}
+	// wake nudges the probe loop (e.g. after clearing a quarantine) without
+	// waiting for the next tick; buffered so senders never block.
+	wake chan struct{}
 
 	mu             sync.Mutex
 	session        *mcp.ClientSession
 	state          upstreamState
 	failures       int
+	quarantined    bool
 	lastErr        string
 	lastTransition time.Time
 	toolDefs       map[string]*mcp.Tool
@@ -74,6 +78,7 @@ func newUpstream(cfg UpstreamConfig, gw *gateway) *upstream {
 		gw:           gw,
 		httpClient:   newHTTPClient(cfg.Headers),
 		done:         make(chan struct{}),
+		wake:         make(chan struct{}, 1),
 		toolDefs:     map[string]*mcp.Tool{},
 		promptDefs:   map[string]*mcp.Prompt{},
 		resourceDefs: map[string]*mcp.Resource{},
@@ -118,7 +123,7 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 func (u *upstream) run(ctx context.Context) {
 	defer close(u.done)
 	u.probeOnce(ctx)
-	ticker := time.NewTicker(u.gw.config().probeInterval())
+	ticker := time.NewTicker(u.nextProbeInterval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -128,9 +133,101 @@ func (u *upstream) run(ctx context.Context) {
 		case <-ticker.C:
 			u.probeOnce(ctx)
 			// Re-read the configured interval so hot reloads of
-			// probeIntervalMs apply to existing upstreams too.
-			ticker.Reset(u.gw.config().probeInterval())
+			// probeIntervalMs apply to existing upstreams too. A quarantined
+			// upstream stops ticking entirely until it is re-enabled or its
+			// config changes (both rebuild the runner).
+			if u.isQuarantined() {
+				stopTicker(ticker)
+			} else {
+				ticker.Reset(u.nextProbeInterval())
+			}
+		case <-u.wake:
+			// Nudged (e.g. quarantine cleared): probe immediately and re-arm
+			// the ticker (it may have been stopped while quarantined).
+			u.probeOnce(ctx)
+			if u.isQuarantined() {
+				stopTicker(ticker)
+			} else {
+				ticker.Reset(u.nextProbeInterval())
+			}
 		}
+	}
+}
+
+// stopTicker stops the ticker and drains a possibly buffered tick so a
+// quarantined upstream is not probed one extra time after the decision to
+// pause.
+func stopTicker(ticker *time.Ticker) {
+	ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			continue
+		default:
+		}
+		break
+	}
+}
+
+// probeIntervalFor computes the probe interval for an upstream with the given
+// consecutive-failure count: the base interval doubled per failure beyond the
+// threshold, capped at max. Pure so the schedule is unit-testable.
+func probeIntervalFor(base time.Duration, failures, threshold int, max time.Duration) time.Duration {
+	if max <= 0 {
+		max = defaultMaxProbeIntervalMs * time.Millisecond
+	}
+	if base <= 0 {
+		base = 15 * time.Second
+	}
+	if base > max {
+		base = max
+	}
+	if failures <= threshold {
+		return base
+	}
+	interval := base
+	for i := threshold; i < failures; i++ {
+		interval *= 2
+		if interval >= max {
+			return max
+		}
+	}
+	if interval > max {
+		interval = max
+	}
+	return interval
+}
+
+// nextProbeInterval is the delay until this upstream's next probe.
+func (u *upstream) nextProbeInterval() time.Duration {
+	u.mu.Lock()
+	failures := u.failures
+	u.mu.Unlock()
+	return probeIntervalFor(
+		u.cfg.probeInterval(u.gw.config().probeInterval()),
+		failures,
+		u.gw.config().FailureThreshold,
+		u.gw.config().maxProbeInterval(),
+	)
+}
+
+func (u *upstream) isQuarantined() bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.quarantined
+}
+
+// resume clears the runtime quarantine and nudges the probe loop so a
+// quarantined upstream starts probing again immediately. It is a no-op for
+// fresh runners (never quarantined) apart from one extra probe.
+func (u *upstream) resume() {
+	u.mu.Lock()
+	u.quarantined = false
+	u.failures = 0
+	u.mu.Unlock()
+	select {
+	case u.wake <- struct{}{}:
+	default:
 	}
 }
 
@@ -479,6 +576,7 @@ func (u *upstream) recordSuccess() {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.failures = 0
+	u.quarantined = false
 	u.lastErr = ""
 	if u.state != stateUp {
 		log.Printf("upstream %q is up", u.cfg.Name)
@@ -490,13 +588,24 @@ func (u *upstream) recordSuccess() {
 
 // recordFailure bumps the failure counter; it returns true once the
 // consecutive-failure threshold is reached, in which case the upstream is
-// marked down and its mirrored catalog is cleared.
+// marked down and its mirrored catalog is cleared. When autoDisableAfter is
+// configured and reached, the upstream is additionally quarantined: probing
+// pauses entirely (runtime-only state, cleared by re-enabling it via the
+// console, changing its config or restarting the process).
 func (u *upstream) recordFailure(err error) bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.failures++
 	u.lastErr = err.Error()
 	threshold := u.gw.config().FailureThreshold
+	if limit := u.gw.config().autoDisableLimit(); limit > 0 && u.failures >= limit && !u.quarantined {
+		u.quarantined = true
+		log.Printf("upstream %q quarantined after %d consecutive failures; probing paused (resume via console toggle or config change)", u.cfg.Name, u.failures)
+		u.gw.logs.add(logEntry{
+			Time: time.Now(), Kind: "event", Event: "quarantined",
+			Upstream: u.cfg.Name, Detail: truncate(err.Error(), maxDetailLen),
+		})
+	}
 	if u.failures < threshold {
 		log.Printf("upstream %q probe failed (%d/%d): %v", u.cfg.Name, u.failures, threshold, err)
 		return false
@@ -652,6 +761,8 @@ type upstreamHealth struct {
 	URL            string `json:"url"`
 	State          string `json:"state"`
 	Enabled        bool   `json:"enabled"`
+	Quarantined    bool   `json:"quarantined,omitempty"`
+	NextProbeMs    int64  `json:"nextProbeMs,omitempty"`
 	Failures       int    `json:"failures"`
 	LastError      string `json:"lastError,omitempty"`
 	LastTransition string `json:"lastTransition,omitempty"`
@@ -662,20 +773,23 @@ type upstreamHealth struct {
 
 func (u *upstream) health() upstreamHealth {
 	u.mu.Lock()
-	defer u.mu.Unlock()
 	h := upstreamHealth{
-		Name:      u.cfg.Name,
-		URL:       u.cfg.URL,
-		State:     u.state.String(),
-		Enabled:   true, // runners only exist for enabled upstreams
-		Failures:  u.failures,
-		LastError: u.lastErr,
-		Tools:     len(u.toolDefs),
-		Prompts:   len(u.promptDefs),
-		Resources: len(u.resourceDefs),
+		Name:        u.cfg.Name,
+		URL:         u.cfg.URL,
+		State:       u.state.String(),
+		Enabled:     true, // runners only exist for enabled upstreams
+		Failures:    u.failures,
+		Quarantined: u.quarantined,
+		LastError:   u.lastErr,
+		Tools:       len(u.toolDefs),
+		Prompts:     len(u.promptDefs),
+		Resources:   len(u.resourceDefs),
 	}
-	if !u.lastTransition.IsZero() {
-		h.LastTransition = u.lastTransition.UTC().Format(time.RFC3339)
+	lastTransition := u.lastTransition
+	u.mu.Unlock()
+	if !lastTransition.IsZero() {
+		h.LastTransition = lastTransition.UTC().Format(time.RFC3339)
 	}
+	h.NextProbeMs = u.nextProbeInterval().Milliseconds()
 	return h
 }
