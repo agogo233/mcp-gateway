@@ -26,12 +26,28 @@ type UpstreamConfig struct {
 	// Headers are sent with every request made to this upstream
 	// (e.g. {"Authorization": "Bearer ..."}).
 	Headers map[string]string `json:"headers,omitempty"`
+	// Enabled gates this upstream on/off. Nil or true means enabled; false
+	// stops the probe loop, drops the session and excludes the upstream from
+	// the per-upstream and aggregate endpoints until re-enabled.
+	Enabled *bool `json:"enabled,omitempty"`
 }
+
+// isEnabled reports whether the upstream should be served. Absent (nil) and
+// explicit true both mean enabled, so existing config files keep working.
+func (u UpstreamConfig) isEnabled() bool {
+	return u.Enabled == nil || *u.Enabled
+}
+
+// enabledPtr is a small helper for building configs in tests and code.
+func enabledPtr(v bool) *bool { return &v }
 
 // equal reports whether two upstream configs are semantically identical;
 // used by hot reload to decide between keep and rebuild.
 func (u UpstreamConfig) equal(o UpstreamConfig) bool {
 	if u.Name != o.Name || u.URL != o.URL || u.CallTimeoutMs != o.CallTimeoutMs || len(u.Headers) != len(o.Headers) {
+		return false
+	}
+	if u.isEnabled() != o.isEnabled() {
 		return false
 	}
 	for k, v := range u.Headers {

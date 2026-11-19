@@ -58,10 +58,15 @@ func newGateway(cfg *Config, version string) *gateway {
 
 func (g *gateway) config() *Config { return g.cfg.Load() }
 
-// start launches one probe loop per upstream plus the aggregate sync loop.
+// start launches one probe loop per enabled upstream plus the aggregate sync
+// loop.
 func (g *gateway) start(ctx context.Context) {
 	g.rootCtx = ctx
 	for _, uc := range g.config().Upstreams {
+		if !uc.isEnabled() {
+			log.Printf("upstream %q is disabled by config; not started", uc.Name)
+			continue
+		}
 		g.addUpstream(uc)
 	}
 	if g.aggregate != nil {
@@ -181,6 +186,14 @@ func (g *gateway) applyConfig(cfg *Config) {
 	// Iterate the config slice (not the map) so the add order — and with it
 	// the aggregate's registration order — is deterministic across reloads.
 	for _, uc := range cfg.Upstreams {
+		if !uc.isEnabled() {
+			// Disabled upstreams have no runner; stop one if it is running.
+			// Re-enabling later flips equal(), which rebuilds the runner.
+			if g.upstream(uc.Name) != nil {
+				toRemove = append(toRemove, uc.Name)
+			}
+			continue
+		}
 		if cur := g.upstream(uc.Name); cur != nil {
 			if cur.cfg.equal(uc) {
 				continue
@@ -430,8 +443,24 @@ func (g *gateway) healthDocument(authorized bool) healthResponse {
 		h := agg.health()
 		health.Aggregate = &h
 	}
+	runners := make(map[string]bool, len(g.upstreams))
 	for _, u := range g.allUpstreams() {
-		health.Upstreams = append(health.Upstreams, u.health())
+		h := u.health()
+		runners[h.Name] = true
+		health.Upstreams = append(health.Upstreams, h)
+	}
+	// Disabled upstreams have no runner; surface them so the console can
+	// show (and flip) the enabled state.
+	for _, uc := range g.config().Upstreams {
+		if uc.isEnabled() || runners[uc.Name] {
+			continue
+		}
+		health.Upstreams = append(health.Upstreams, upstreamHealth{
+			Name:    uc.Name,
+			URL:     uc.URL,
+			State:   "disabled",
+			Enabled: false,
+		})
 	}
 	return health
 }

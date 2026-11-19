@@ -92,10 +92,11 @@ function renderHealth(h) {
   $('#hTime').textContent = h.time ? '服务器时间 ' + new Date(h.time).toLocaleString('zh-CN', { hour12: false }) : '';
   $('#hUptime').textContent = h.uptime || '…';
   const ups = h.upstreams || [];
-  const upCount = ups.filter(u => u.state === 'up').length;
+  const act = ups.filter(u => u.enabled !== false);
+  const upCount = act.filter(u => u.state === 'up').length;
   $('#hUpstreams').innerHTML = esc(String(upCount)) +
-    ' <span style="font-size:14px;color:var(--muted)">/ ' + esc(String(ups.length)) + ' 正常</span>';
-  $('#hUpstreamsSub').textContent = (ups.length - upCount) > 0 ? (ups.length - upCount) + ' 个上游已标记 down' : '全部上游正常';
+    ' <span style="font-size:14px;color:var(--muted)">/ ' + esc(String(act.length)) + ' 正常</span>';
+  $('#hUpstreamsSub').textContent = (act.length - upCount) > 0 ? (act.length - upCount) + ' 个上游已标记 down' : '全部上游正常';
   if (h.aggregate) {
     $('#hAgg').textContent = '/mcp/' + h.aggregate.name;
     $('#hAggSub').textContent = '聚合端点已启用';
@@ -104,16 +105,22 @@ function renderHealth(h) {
     $('#hAggSub').textContent = '配置 aggregate 后显示';
   }
   $('#upHealthList').innerHTML = ups.map(u => {
-    const cls = u.state === 'up' ? 'up' : u.state === 'down' ? 'down' : 'unknown';
+    const disabled = u.enabled === false;
+    const quarantined = u.quarantined === true;
+    const cls = disabled ? 'unknown' : u.state === 'up' ? 'up' : u.state === 'down' ? 'down' : 'unknown';
+    const stateLabel = disabled ? '已停用' : (quarantined ? u.state + ' · 已自动禁用' : u.state);
     return '<div class="up-card"><div class="dot ' + cls + '"></div><div>' +
-      '<div class="name">' + esc(u.name) + '</div>' +
+      '<div class="name">' + esc(u.name) + (disabled ? ' <span class="tag dis">已停用</span>' : '') +
+      (quarantined ? ' <span class="tag err">已自动禁用</span>' : '') + '</div>' +
       '<div class="url">' + esc(u.url) + '</div>' +
       '<div class="count">tools <b>' + esc(u.tools) + '</b></div>' +
       '<div class="count">prompts <b>' + esc(u.prompts) + '</b></div>' +
       '<div class="count">resources <b>' + esc(u.resources) + '</b></div>' +
       (u.lastError ? '<div class="err">last error: ' + esc(u.lastError) + '</div>' : '') +
-      '</div><div class="meta">' + esc(u.state) + ' · 失败 ' + esc(u.failures) +
+      '</div><div class="meta">' + esc(stateLabel) + ' · 失败 ' + esc(u.failures) +
       (u.lastTransition ? '<br>最近切换 ' + esc(new Date(u.lastTransition).toLocaleString('zh-CN', { hour12: false })) : '') +
+      '<br><button class="ghost" data-action="toggle-upstream" data-name="' + esc(u.name) + '" data-enabled="' + (!disabled) + '" type="button">' +
+      (disabled ? '启用' : '停用') + '</button>' +
       '</div></div>';
   }).join('') || '<div class="muted">暂无上游</div>';
 }
@@ -135,7 +142,8 @@ async function refreshHealth() {
 
 function fillCatalogUpstreams() {
   const sel = $('#catUp');
-  const names = (health && health.upstreams ? health.upstreams : []).map(u => u.name);
+  const names = (health && health.upstreams ? health.upstreams : [])
+    .filter(u => u.enabled !== false).map(u => u.name);
   const cur = sel.value;
   sel.innerHTML = names.map(n => '<option value="' + esc(n) + '">上游：' + esc(n) + '</option>').join('')
     || '<option value="">（暂无上游）</option>';
@@ -203,6 +211,7 @@ function renderUpstreamCards(ups) {
     '<div class="field" style="flex:2"><label>url</label><input type="text" class="up-url" value="' + esc(u.url) + '"></div></div>' +
     '<div class="row"><div class="field" style="flex:1"><label>callTimeoutMs</label><input type="number" class="up-timeout" value="' + esc(u.callTimeoutMs || '') + '" placeholder="60000"></div>' +
     '<div class="field" style="flex:2"><label>headers（每行一条 Key: ***；*** 表示保持不变）</label><textarea class="up-headers" placeholder="Authorization: ***">' + esc(headerText(u.headers)) + '</textarea></div>' +
+    '<label class="muted" style="flex:none;white-space:nowrap"><input type="checkbox" class="up-enabled" ' + (u.enabled !== false ? 'checked' : '') + '> 启用</label>' +
     '<button class="danger" data-action="del-upstream" data-i="' + i + '" type="button">删除</button></div></div>').join('');
 }
 
@@ -253,6 +262,7 @@ function collectConfig() {
       name: card.querySelector('.up-name').value.trim(),
       url: card.querySelector('.up-url').value.trim(),
       callTimeoutMs: parseInt(card.querySelector('.up-timeout').value, 10) || 0,
+      enabled: card.querySelector('.up-enabled').checked,
       headers
     });
   });
@@ -287,6 +297,21 @@ async function reloadConfig() {
     await loadConfig();
   } catch (e) {
     if (e.message !== 'unauthorized') toast('重载失败: ' + e.message, 'err');
+  }
+}
+
+async function toggleUpstream(name, enabled) {
+  if (!confirm(enabled ? '启用上游 ' + name + ' 并立即探测？' : '停用上游 ' + name + '？将停止探测并从目录与聚合端点移除。')) return;
+  try {
+    await api('/api/upstream/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ name, enabled })
+    });
+    toast((enabled ? '已启用 ' : '已停用 ') + name);
+    await refreshHealth();
+    if (activeTab === 'catalog') { fillCatalogUpstreams(); loadCatalog(); }
+  } catch (e) {
+    if (e.message !== 'unauthorized') toast('操作失败: ' + e.message, 'err');
   }
 }
 
@@ -427,6 +452,9 @@ document.addEventListener('click', e => {
       renderUpstreamCards(ups);
       break;
     }
+    case 'toggle-upstream':
+      toggleUpstream(btn.dataset.name, btn.dataset.enabled === 'true');
+      break;
   }
 });
 

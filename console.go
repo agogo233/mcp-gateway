@@ -104,6 +104,8 @@ func (g *gateway) serveAPI(w http.ResponseWriter, r *http.Request) {
 		g.handleAPILogs(w, r)
 	case rest == "/reload" && r.Method == http.MethodPost:
 		g.handleAPIReload(w, r)
+	case rest == "/upstream/toggle" && r.Method == http.MethodPost:
+		g.handleAPIUpstreamToggle(w, r)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -217,6 +219,7 @@ type upstreamView struct {
 	URL           string            `json:"url"`
 	CallTimeoutMs int               `json:"callTimeoutMs,omitempty"`
 	Headers       map[string]string `json:"headers,omitempty"`
+	Enabled       bool              `json:"enabled"`
 }
 
 type configView struct {
@@ -263,7 +266,7 @@ func (g *gateway) handleAPIConfigGet(w http.ResponseWriter, r *http.Request) {
 		Upstreams:         []upstreamView{},
 	}
 	for _, u := range cfg.Upstreams {
-		uv := upstreamView{Name: u.Name, URL: u.URL, CallTimeoutMs: u.CallTimeoutMs}
+		uv := upstreamView{Name: u.Name, URL: u.URL, CallTimeoutMs: u.CallTimeoutMs, Enabled: u.isEnabled()}
 		if len(u.Headers) > 0 {
 			uv.Headers = make(map[string]string, len(u.Headers))
 			for k := range u.Headers {
@@ -305,6 +308,9 @@ type upstreamEdit struct {
 	URL           string            `json:"url"`
 	CallTimeoutMs int               `json:"callTimeoutMs,omitempty"`
 	Headers       map[string]string `json:"headers,omitempty"`
+	// Enabled nil keeps the current state (or defaults to enabled for new
+	// upstreams); true/false sets it explicitly.
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // handleAPIConfigPut validates and applies a configuration edit. With
@@ -407,6 +413,12 @@ func buildEditedConfig(cur *Config, e *configEdit) (*Config, []string, error) {
 		ups := make([]UpstreamConfig, 0, len(e.Upstreams))
 		for _, ue := range e.Upstreams {
 			uc := UpstreamConfig{Name: ue.Name, URL: ue.URL, CallTimeoutMs: ue.CallTimeoutMs}
+			if ue.Enabled != nil {
+				uc.Enabled = ue.Enabled
+			} else if prev, ok := findUpstream(cur.Upstreams, ue.Name); ok {
+				// Omitted enabled flag keeps the upstream's current state.
+				uc.Enabled = prev.Enabled
+			}
 			if len(ue.Headers) > 0 {
 				uc.Headers = make(map[string]string, len(ue.Headers))
 				for k, v := range ue.Headers {
@@ -486,6 +498,16 @@ func existingHeader(upstreams []UpstreamConfig, name, key string) (string, bool)
 	return "", false
 }
 
+// findUpstream looks up an upstream config by name.
+func findUpstream(upstreams []UpstreamConfig, name string) (UpstreamConfig, bool) {
+	for _, u := range upstreams {
+		if u.Name == name {
+			return u, true
+		}
+	}
+	return UpstreamConfig{}, false
+}
+
 func cloneAuth(a *AuthConfig) *AuthConfig {
 	if a == nil {
 		return nil
@@ -517,8 +539,16 @@ func reloadWarnings(cur, nc *Config) []string {
 		newNames[u.Name] = true
 		if old, ok := curByName[u.Name]; !ok {
 			warnings = append(warnings, fmt.Sprintf("上游 %q 将新增并开始探测", u.Name))
-		} else if !old.equal(u) {
-			warnings = append(warnings, fmt.Sprintf("上游 %q 配置变更将重建连接，进行中的调用可能失败", u.Name))
+		} else {
+			if !old.equal(u) {
+				warnings = append(warnings, fmt.Sprintf("上游 %q 配置变更将重建连接，进行中的调用可能失败", u.Name))
+			}
+			if old.isEnabled() && !u.isEnabled() {
+				warnings = append(warnings, fmt.Sprintf("上游 %q 将停用：停止探测并从目录与聚合端点移除", u.Name))
+			}
+			if !old.isEnabled() && u.isEnabled() {
+				warnings = append(warnings, fmt.Sprintf("上游 %q 将启用并开始探测", u.Name))
+			}
 		}
 	}
 	for _, u := range cur.Upstreams {
@@ -574,6 +604,50 @@ func saveConfigFile(path string, cfg *Config) error {
 	}
 	tmpName = ""
 	return nil
+}
+
+// handleAPIUpstreamToggle flips one upstream's enabled flag. It persists the
+// change to gateway.json (like a config save) and hot-reloads, so a disabled
+// upstream stops being probed/served immediately and stays off across
+// restarts until re-enabled. Quarantine (auto-disable) is runtime-only and
+// unaffected; enabling an upstream clears it via the rebuild below.
+func (g *gateway) handleAPIUpstreamToggle(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var req struct {
+		Name    string `json:"name"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.Enabled == nil {
+		http.Error(w, "invalid json: need {\"name\": string, \"enabled\": bool}", http.StatusBadRequest)
+		return
+	}
+	apiWriteMu.Lock()
+	defer apiWriteMu.Unlock()
+
+	cur := g.config()
+	idx := -1
+	for i := range cur.Upstreams {
+		if cur.Upstreams[i].Name == req.Name {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		http.Error(w, "unknown upstream", http.StatusNotFound)
+		return
+	}
+	nc := *cur
+	nc.Upstreams = cloneUpstreams(cur.Upstreams)
+	nc.Upstreams[idx].Enabled = req.Enabled
+	if err := saveConfigFile(g.configPath, &nc); err != nil {
+		g.writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":     fmt.Sprintf("persist failed, keeping current configuration: %v", err),
+			"persisted": false,
+		})
+		return
+	}
+	g.applyConfig(&nc)
+	g.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": req.Name, "enabled": *req.Enabled})
 }
 
 // handleAPILogs returns the newest activity entries (calls and lifecycle

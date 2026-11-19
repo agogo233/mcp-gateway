@@ -461,3 +461,88 @@ func TestConfigSaveRewritesNamedTokens(t *testing.T) {
 		t.Fatalf("named token format not persisted: %s", string(data))
 	}
 }
+
+// toggleRequest is a small helper around the upstream toggle API.
+func toggleRequest(t *testing.T, url, token, name string, enabled bool) (*http.Response, string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"name": name, "enabled": enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return apiRequest(t, http.MethodPost, url+"/api/upstream/toggle", token, string(body))
+}
+
+func TestUpstreamToggleLifecycle(t *testing.T) {
+	_, ts, path := startConsoleGateway(t, func(cfg *Config) {
+		cfg.Upstreams = append(cfg.Upstreams, UpstreamConfig{Name: "test2", URL: cfg.Upstreams[0].URL})
+	})
+	waitForState(t, ts.URL+"/healthz", "test", "up", 5*time.Second)
+	waitForState(t, ts.URL+"/healthz", "test2", "up", 5*time.Second)
+
+	// Disable test2: it must lose its runner, drop out of /mcp/* and show up
+	// in the health document as disabled.
+	if resp, body := toggleRequest(t, ts.URL, consoleToken, "test2", false); resp.StatusCode != http.StatusOK {
+		t.Fatalf("toggle off: expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	waitForState(t, ts.URL+"/healthz", "test2", "disabled", 5*time.Second)
+	if resp, _ := apiRequest(t, http.MethodPost, ts.URL+"/mcp/test2", "", "{}"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("disabled upstream endpoint: expected 404, got %d", resp.StatusCode)
+	}
+	if g := newGatewayForTest(t, path); g.upstream("test2") != nil {
+		t.Fatal("disabled upstream must not have a runner")
+	}
+
+	// The persisted file must carry enabled:false for test2 only.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"enabled": false`) || strings.Count(string(data), "enabled") != 1 {
+		t.Fatalf("enabled flag not persisted correctly: %s", string(data))
+	}
+
+	// Re-enable: the runner comes back and the endpoint serves again.
+	if resp, body := toggleRequest(t, ts.URL, consoleToken, "test2", true); resp.StatusCode != http.StatusOK {
+		t.Fatalf("toggle on: expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	waitForState(t, ts.URL+"/healthz", "test2", "up", 5*time.Second)
+	cs := connectClient(t, ts.URL+"/mcp/test2")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := cs.ListTools(ctx, nil); err != nil {
+		t.Fatalf("re-enabled upstream must serve tools: %v", err)
+	}
+}
+
+func TestUpstreamToggleAuthAndValidation(t *testing.T) {
+	_, ts, _ := startConsoleGateway(t, func(cfg *Config) {
+		cfg.Auth = &AuthConfig{Tokens: []AuthClient{{Name: "opencode", Token: "downstream-token-0123456"}}}
+	})
+	// Missing console token → 401.
+	if resp, _ := toggleRequest(t, ts.URL, "", "test", false); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("missing console token: expected 401, got %d", resp.StatusCode)
+	}
+	// A downstream auth token must not open the console API.
+	if resp, _ := toggleRequest(t, ts.URL, "downstream-token-0123456", "test", false); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("downstream token: expected 401, got %d", resp.StatusCode)
+	}
+	// Unknown upstream → 404.
+	if resp, _ := toggleRequest(t, ts.URL, consoleToken, "nope", false); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown upstream: expected 404, got %d", resp.StatusCode)
+	}
+	// Missing enabled field → 400.
+	if resp, _ := apiRequest(t, http.MethodPost, ts.URL+"/api/upstream/toggle", consoleToken, `{"name":"test"}`); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing enabled: expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// newGatewayForTest re-loads the config file from disk into a fresh gateway,
+// proving the persisted file (not just memory) carries the change.
+func newGatewayForTest(t *testing.T, path string) *gateway {
+	t.Helper()
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newGateway(cfg, "test")
+}

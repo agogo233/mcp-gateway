@@ -651,6 +651,7 @@ type upstreamHealth struct {
 	Name           string `json:"name"`
 	URL            string `json:"url"`
 	State          string `json:"state"`
+	Enabled        bool   `json:"enabled"`
 	Failures       int    `json:"failures"`
 	LastError      string `json:"lastError,omitempty"`
 	LastTransition string `json:"lastTransition,omitempty"`
@@ -666,6 +667,7 @@ func (u *upstream) health() upstreamHealth {
 		Name:      u.cfg.Name,
 		URL:       u.cfg.URL,
 		State:     u.state.String(),
+		Enabled:   true, // runners only exist for enabled upstreams
 		Failures:  u.failures,
 		LastError: u.lastErr,
 		Tools:     len(u.toolDefs),

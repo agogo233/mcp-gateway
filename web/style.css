@@ -61,6 +61,8 @@ pre{font-family:var(--mono);font-size:12px;color:#9ecbff;overflow:auto;padding:6
 .tag{display:inline-block;font-family:var(--mono);font-size:11px;padding:1px 8px;border-radius:8px;border:1px solid var(--border);color:var(--muted)}
 .tag.ok{color:var(--green);border-color:var(--green)}
 .tag.err{color:var(--red);border-color:var(--red)}
+.tag.dis{color:var(--yellow);border-color:var(--yellow)}
+.up-card .meta button{margin-top:6px}
 .toast{position:fixed;bottom:24px;right:24px;background:var(--green);color:#04140a;padding:12px 20px;border-radius:8px;font-weight:600;opacity:0;transition:.3s;pointer-events:none;z-index:200;max-width:60%}
 .toast.show{opacity:1}
 .toast.warn{background:var(--yellow)}
