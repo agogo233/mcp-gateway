@@ -1,10 +1,15 @@
 # MCP 独立部署栈：故障隔离网关 + GitHub MCP
 # 前提：OpenCodeUI 栈已启动（网络 opencode-net 已存在）。
-# 用法：cp .env.example .env，填入 GITHUB_PERSONAL_ACCESS_TOKEN 后：
+# 用法：
+#   cp ../gateway.json gwconfig/   # 配置拷入挂载目录（目录已在 .gitignore 忽略）
+#   cp .env.example .env 并填入 GITHUB_PERSONAL_ACCESS_TOKEN
 #   docker compose up -d --build
 #
 # 控制台：浏览器打开 http://<宿主机IP>:9200/ ，首次粘贴 console token
 # （gateway.json 的 console.tokens，与下游 token 相互独立）。
+#
+# 说明：网关以 user: "0:0" 运行且配置按目录挂载——控制台保存/上游启停需要
+# 在配置目录内做"临时文件+rename"原子写，单文件只读挂载无法支持。
 
 services:
   mcp-gateway:
@@ -15,6 +20,9 @@ services:
     image: mcp-gateway:local
     container_name: mcp-gateway
     restart: unless-stopped
+    # 镜像默认 USER app（非 root）；宿主机 gateway.json 为 0600，控制台
+    # 持久化（保存/启停写盘）需要写权限，故以 root 运行本容器。
+    user: "0:0"
     depends_on:
       github-mcp:
         condition: service_healthy
@@ -23,7 +31,7 @@ services:
       # 可开放给局域网（/mcp/* 与 /api/* 均需各自 token，建议配合防火墙限源）。
       - "${MCP_GATEWAY_ADDR:-127.0.0.1}:9200:9200"
     volumes:
-      - ../gateway.json:/etc/mcp-gateway/gateway.json:ro
+      - ./gwconfig:/etc/mcp-gateway
     networks:
       - opencode-net
     healthcheck:

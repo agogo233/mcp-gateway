@@ -158,9 +158,13 @@ go build ./... && go vet ./... && go test ./... -race -count=1
 
 ```sh
 cd deploy
-cp .env.example .env        # 填入 GITHUB_PERSONAL_ACCESS_TOKEN（细粒度 PAT）
+cp ../gateway.json gwconfig/   # 配置拷入挂载目录（目录已 gitignore）
+cp .env.example .env           # 填入 GITHUB_PERSONAL_ACCESS_TOKEN（细粒度 PAT）
 docker compose up -d --build
 ```
+
+配置按**目录**挂载且容器以 `user: "0:0"` 运行：控制台的配置保存与上游启停需要在
+配置目录内做"临时文件 + rename"原子写，单文件只读挂载无法支持（会报 persist failed）。
 
 `deploy/.env` 可调项：`GITHUB_TOOLSETS`（`default` 或 `all`）、`GITHUB_MCP_READ_ONLY`、
 `MCP_GATEWAY_ADDR`（控制台/MCP 暴露地址：默认 `127.0.0.1` 仅宿主机本机；局域网访问设 `0.0.0.0`
@@ -170,8 +174,9 @@ docker compose up -d --build
 
 ```sh
 docker build -t mcp-gateway:latest .
+mkdir -p gwrun && cp gateway.json gwrun/
 docker run -d --name mcp-gateway \
-  -v $PWD/gateway.json:/etc/mcp-gateway/gateway.json:ro \
+  -v $PWD/gwrun:/etc/mcp-gateway \
   -p 127.0.0.1:9200:9200 \
   --network <opencode所在网络> \
   mcp-gateway:latest
@@ -180,7 +185,8 @@ curl http://127.0.0.1:9200/healthz
 docker kill -s HUP mcp-gateway
 ```
 
-（需要通过管理控制台保存配置时，把上面的 `:ro` 去掉改为可写挂载。）
+（手动运行的容器默认以镜像内置的 `app` 用户运行；需要通过管理控制台保存配置或
+启停上游时，请追加 `--user 0:0` 以获得挂载目录的写权限。）
 
 ## opencode 侧接入
 
