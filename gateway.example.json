@@ -1,0 +1,28 @@
+{
+  "listen": ":9200",
+  "probeIntervalMs": 15000,
+  "connectTimeoutMs": 3000,
+  "listTimeoutMs": 3000,
+  "failureThreshold": 2,
+  "shutdownTimeoutMs": 5000,
+  "aggregate": "all",
+  "watchConfig": true,
+  "auth": {
+    "tokens": ["<openssl-rand-hex-32>"]
+  },
+  "upstreams": [
+    {
+      "name": "ida",
+      "url": "http://192.0.2.10:8737/mcp",
+      "callTimeoutMs": 60000
+    },
+    {
+      "name": "x64dbg",
+      "url": "http://192.0.2.20:9094/",
+      "callTimeoutMs": 300000,
+      "headers": {
+        "Authorization": "Bearer <token>"
+      }
+    }
+  ]
+}

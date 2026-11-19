@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ["*"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to commit SHAs of the referenced major-version tags
+      # (supply-chain hardening; re-check on version bumps).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "unformatted files: $unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./... -race -count=1
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: build image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: mcp-gateway:ci
+      - name: smoke test
+        run: |
+          docker run -d --name gw -v "$PWD/gateway.example.json:/etc/mcp-gateway/gateway.json:ro" -p 9200:9200 mcp-gateway:ci
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:9200/healthz > /dev/null; then
+              curl -s http://127.0.0.1:9200/healthz
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs gw
+          exit 1
