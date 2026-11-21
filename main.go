@@ -34,6 +34,10 @@ func main() {
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           g.handler(),
+		// ReadTimeout bounds slow-loris style request bodies. There is
+		// deliberately no WriteTimeout: the MCP SDK streams responses (SSE)
+		// and a write deadline would kill long-lived streams.
+		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       90 * time.Second,
 	}

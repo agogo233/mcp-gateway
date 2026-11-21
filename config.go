@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -306,6 +308,16 @@ func loadConfig(path string) (*Config, error) {
 // by file loading and by console config saves so both paths enforce exactly
 // the same rules.
 func (c *Config) validate() error {
+	// Reject a malformed listen address at save/load time; otherwise the
+	// process would only fail on the next restart.
+	if c.Listen == "" {
+		return fmt.Errorf("listen is required")
+	}
+	if _, port, err := net.SplitHostPort(c.Listen); err != nil {
+		return fmt.Errorf("listen %q must be host:port (e.g. \":9200\")", c.Listen)
+	} else if n, perr := strconv.Atoi(port); perr != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("listen %q: port must be an integer between 1 and 65535", c.Listen)
+	}
 	if c.Aggregate != "" && !aggregateNameRE.MatchString(c.Aggregate) {
 		return fmt.Errorf("aggregate %q may only contain letters, digits, '_' and '-'", c.Aggregate)
 	}

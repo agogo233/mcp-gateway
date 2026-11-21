@@ -541,9 +541,20 @@ func cloneAuth(a *AuthConfig) *AuthConfig {
 	return c
 }
 
+// cloneUpstreams deep-copies the upstream list. Headers maps are duplicated
+// too: callers mutate the copy (e.g. toggling enabled) and must never share
+// the header map with the live configuration.
 func cloneUpstreams(list []UpstreamConfig) []UpstreamConfig {
 	out := make([]UpstreamConfig, len(list))
-	copy(out, list)
+	for i, u := range list {
+		out[i] = u
+		if u.Headers != nil {
+			out[i].Headers = make(map[string]string, len(u.Headers))
+			for k, v := range u.Headers {
+				out[i].Headers[k] = v
+			}
+		}
+	}
 	return out
 }
 

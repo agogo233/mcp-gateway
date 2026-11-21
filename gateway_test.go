@@ -779,6 +779,11 @@ func TestConfigValidation(t *testing.T) {
 		`{"upstreams":[{"name":"ida","url":"not-a-url"}]}`,
 		`{"upstreams":[{"name":"ida","url":"ftp://x/mcp"}]}`,
 		`{"upstreams":[{"name":"ida","url":"http://"}]}`,
+		`{"listen":"9200","upstreams":[{"name":"ida","url":"http://x"}]}`,
+		`{"listen":":0","upstreams":[{"name":"ida","url":"http://x"}]}`,
+		`{"listen":":99999","upstreams":[{"name":"ida","url":"http://x"}]}`,
+		`{"listen":":http","upstreams":[{"name":"ida","url":"http://x"}]}`,
+		`{"listen":"[::1]:9200x","upstreams":[{"name":"ida","url":"http://x"}]}`,
 	} {
 		if err := write(bad); err != nil {
 			t.Fatal(err)
@@ -793,6 +798,21 @@ func TestConfigValidation(t *testing.T) {
 	}
 	if _, err := loadConfig(filepath.Join(dir, "gateway.json")); err != nil {
 		t.Fatalf("valid auth config rejected: %v", err)
+	}
+
+	// Listen accepts host:port, bare ":port" and bracketed IPv6; it is
+	// validated eagerly so a typo cannot break the next restart.
+	for _, ok := range []string{
+		`{"listen":":9200","upstreams":[{"name":"ida","url":"http://x"}]}`,
+		`{"listen":"127.0.0.1:9200","upstreams":[{"name":"ida","url":"http://x"}]}`,
+		`{"listen":"[::1]:9200","upstreams":[{"name":"ida","url":"http://x"}]}`,
+	} {
+		if err := write(ok); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadConfig(filepath.Join(dir, "gateway.json")); err != nil {
+			t.Fatalf("valid listen rejected: %v (%s)", err, ok)
+		}
 	}
 }
 
