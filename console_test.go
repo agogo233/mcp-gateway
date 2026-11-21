@@ -619,3 +619,39 @@ func newGatewayForTest(t *testing.T, path string) *gateway {
 	}
 	return newGateway(cfg, "test")
 }
+
+// TestConsoleConfigPutRateLimitRoundTrip: an authRateLimit section survives
+// saves that do not mention it, and a PUT can replace it wholesale.
+func TestConsoleConfigPutRateLimitRoundTrip(t *testing.T) {
+	_, ts, path := startConsoleGateway(t, func(cfg *Config) {
+		cfg.AuthRateLimit = &AuthRateLimitConfig{WindowMs: 60000, MaxFails: 7, BlockMs: 60000}
+	})
+
+	// A save without the section keeps the configured values.
+	resp, body := apiRequest(t, http.MethodPut, ts.URL+"/api/config", consoleToken, "{}")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("plain save: expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AuthRateLimit == nil || cfg.AuthRateLimit.MaxFails != 7 {
+		t.Fatalf("authRateLimit lost on plain save: %+v", cfg.AuthRateLimit)
+	}
+
+	// A PUT with the section replaces it wholesale (zero fields fall back to
+	// the defaults at runtime).
+	edit := map[string]any{"authRateLimit": map[string]any{"maxFails": 3}}
+	raw, _ := json.Marshal(edit)
+	if resp, body = apiRequest(t, http.MethodPut, ts.URL+"/api/config", consoleToken, string(raw)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("rate limit edit: expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	cfg, err = loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AuthRateLimit == nil || cfg.AuthRateLimit.MaxFails != 3 || cfg.AuthRateLimit.WindowMs != 0 {
+		t.Fatalf("authRateLimit edit not persisted as sent: %+v", cfg.AuthRateLimit)
+	}
+}

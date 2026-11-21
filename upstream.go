@@ -70,6 +70,9 @@ type upstream struct {
 	toolDefs       map[string]*mcp.Tool
 	promptDefs     map[string]*mcp.Prompt
 	resourceDefs   map[string]*mcp.Resource // keyed by URI
+	// syncBudgetWarns counts consecutive sync-budget warnings for log/event
+	// pacing (first + every 10th), guarded by mu.
+	syncBudgetWarns int
 }
 
 func newUpstream(cfg UpstreamConfig, gw *gateway) *upstream {
@@ -403,11 +406,20 @@ func (u *upstream) syncCatalog(ctx context.Context, s *mcp.ClientSession) {
 	}
 
 	if err := sctx.Err(); err != nil {
-		log.Printf("upstream %q: catalog sync exceeded budget %s; keeping previous catalog", u.cfg.Name, u.gw.config().syncBudget())
-		u.gw.logs.add(logEntry{
-			Time: time.Now(), Kind: "event", Event: "sync-budget",
-			Upstream: u.cfg.Name, Detail: "catalog sync exceeded budget; keeping previous catalog",
-		})
+		// Pace the warning: first occurrence and every 10th after that, so
+		// a persistently huge catalog does not flood the log and the
+		// console event timeline.
+		u.mu.Lock()
+		u.syncBudgetWarns++
+		warns := u.syncBudgetWarns
+		u.mu.Unlock()
+		if warns == 1 || warns%10 == 0 {
+			log.Printf("upstream %q: catalog sync exceeded budget %s; keeping previous catalog (warnings=%d)", u.cfg.Name, u.gw.config().syncBudget(), warns)
+			u.gw.logs.add(logEntry{
+				Time: time.Now(), Kind: "event", Event: "sync-budget",
+				Upstream: u.cfg.Name, Detail: truncate(fmt.Sprintf("catalog sync exceeded budget; keeping previous catalog (warnings=%d)", warns), maxDetailLen),
+			})
+		}
 		return
 	}
 	u.reconcile(tools, prompts, resources)

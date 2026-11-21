@@ -99,7 +99,7 @@ function renderHealth(h) {
     ' <span style="font-size:14px;color:var(--muted)">/ ' + esc(String(act.length)) + ' 正常</span>';
   $('#hUpstreamsSub').textContent = (act.length - upCount) > 0 ? (act.length - upCount) + ' 个上游已标记 down' : '全部上游正常';
   const listenEl = $('#hListen');
-  if (listenEl) listenEl.textContent = h.listen ? '实际监听地址：' + h.listen : '';
+  if (listenEl) listenEl.textContent = h.listen ? '监听地址：' + h.listen + '（进程启动时配置，修改需重启生效）' : '';
   const lw = $('#listenWarn');
   if (lw) {
     const drift = configuredListen && h.listen && configuredListen !== h.listen;
@@ -443,7 +443,7 @@ function boot() {
   refreshHealth().then(() => {
     if (activeTab === 'catalog') { fillCatalogUpstreams(); loadCatalog(); }
   });
-  if (activeTab === 'config') loadConfig();
+  loadConfig(); // fills configuredListen so the health page can flag drift
   if (activeTab === 'logs') loadLogs();
 }
 

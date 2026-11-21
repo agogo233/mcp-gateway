@@ -1709,3 +1709,46 @@ func TestBearerToken(t *testing.T) {
 		}
 	}
 }
+
+// TestHealthzRejectsInvalidToken: a presented-but-invalid token on /healthz
+// is treated as a failed authentication (401, counted by the per-IP limiter),
+// so the liveness endpoint cannot be used as a token oracle. Headerless
+// healthchecks stay on 200 even while a source is blocked.
+func TestHealthzRejectsInvalidToken(t *testing.T) {
+	fake := newFakeUpstream(t, false)
+	cfg := authTestConfig(fake.ts.URL, authTokenA)
+	cfg.AuthRateLimit = &AuthRateLimitConfig{WindowMs: 60000, MaxFails: 3, BlockMs: 60000}
+	gw := startGateway(t, cfg)
+	waitForState(t, gw.URL+"/healthz", "test", "up", 5*time.Second, authTokenA)
+
+	getStatus := func(token string) int {
+		req, err := http.NewRequest(http.MethodGet, gw.URL+"/healthz", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if got := getStatus(""); got != http.StatusOK {
+		t.Fatalf("headerless healthcheck must stay 200, got %d", got)
+	}
+	for i := 1; i <= 3; i++ {
+		if got := getStatus("bogus-token-0123456789"); got != http.StatusUnauthorized {
+			t.Fatalf("invalid token %d: expected 401, got %d", i, got)
+		}
+	}
+	if got := getStatus("bogus-token-0123456789"); got != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 once the limit trips, got %d", got)
+	}
+	if got := getStatus(""); got != http.StatusOK {
+		t.Fatalf("headerless healthcheck must stay 200 while blocked, got %d", got)
+	}
+}

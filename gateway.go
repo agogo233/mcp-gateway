@@ -73,10 +73,13 @@ func newGateway(cfg *Config, version string) *gateway {
 
 func (g *gateway) config() *Config { return g.cfg.Load() }
 
-// setListen records the address the HTTP server actually bound to.
+// setListen records the configured listen address (the startup value).
+// Listen changes need a process restart, so this stays constant across hot
+// reloads and lets the console show drift against the edited config.
 func (g *gateway) setListen(addr string) { g.listen.Store(&addr) }
 
-// effectiveListen returns the bound address, or "" when unknown (tests).
+// effectiveListen returns the recorded listen address, or "" when unknown
+// (tests that never set it).
 func (g *gateway) effectiveListen() string {
 	if a := g.listen.Load(); a != nil {
 		return *a
@@ -487,6 +490,25 @@ func (g *gateway) serveMCP(w http.ResponseWriter, r *http.Request, rest string) 
 func (g *gateway) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, authorized := g.authorizeAuth(r)
+	// A presented-but-invalid token is a brute-force attempt even here:
+	// answer 401 and count it like any other failed authentication, so
+	// /healthz cannot serve as a token oracle. Requests without an
+	// Authorization header (container healthchecks) are unaffected.
+	if !authorized && g.config().authEnabled() && r.Header.Get("Authorization") != "" {
+		ip := clientIP(r)
+		rl := g.config().authRateLimit()
+		if b, retry := g.authFails.blocked(ip, rl, time.Now()); b {
+			writeTooManyRequests(w, retry)
+			return
+		}
+		if b, _, _ := g.authFails.recordFailure(ip, rl, time.Now()); b {
+			writeTooManyRequests(w, retryAfter(rl))
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer realm="mcp-gateway"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	_ = json.NewEncoder(w).Encode(g.healthDocument(authorized))
 }
 

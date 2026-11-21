@@ -19,6 +19,11 @@
   "console": {
     "tokens": ["<third-openssl-rand-hex-32>"]
   },
+  "authRateLimit": {
+    "windowMs": 60000,
+    "maxFails": 10,
+    "blockMs": 60000
+  },
   "upstreams": [
     {
       "name": "ida",

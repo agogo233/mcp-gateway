@@ -42,7 +42,7 @@ func main() {
 		IdleTimeout:       90 * time.Second,
 	}
 	errCh := make(chan error, 1)
-	g.setListen(cfg.Listen) // actual bound address, surfaced via /api/health
+	g.setListen(cfg.Listen) // startup listen value, surfaced via /api/health for drift display
 	go func() { errCh <- srv.ListenAndServe() }()
 	endpoint := ""
 	if name := g.aggregateName(); name != "" {

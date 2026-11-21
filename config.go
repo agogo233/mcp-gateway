@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -292,6 +291,22 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+// isDecimalPort reports whether s is 1-5 ASCII digits with a value within
+// 1-65535. Stricter than strconv.Atoi: no sign, no leading '+', no blanks.
+func isDecimalPort(s string) bool {
+	if s == "" || len(s) > 5 {
+		return false
+	}
+	n := 0
+	for _, ch := range s {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+		n = n*10 + int(ch-'0')
+	}
+	return n >= 1 && n <= 65535
+}
+
 func (c *Config) probeInterval() time.Duration {
 	return time.Duration(c.ProbeIntervalMs) * time.Millisecond
 }
@@ -371,13 +386,14 @@ func loadConfig(path string) (*Config, error) {
 // the same rules.
 func (c *Config) validate() error {
 	// Reject a malformed listen address at save/load time; otherwise the
-	// process would only fail on the next restart.
+	// process would only fail on the next restart. Note port 0 (random
+	// port) is rejected too: it is never useful for a gateway deployment.
 	if c.Listen == "" {
 		return fmt.Errorf("listen is required")
 	}
 	if _, port, err := net.SplitHostPort(c.Listen); err != nil {
 		return fmt.Errorf("listen %q must be host:port (e.g. \":9200\")", c.Listen)
-	} else if n, perr := strconv.Atoi(port); perr != nil || n < 1 || n > 65535 {
+	} else if !isDecimalPort(port) {
 		return fmt.Errorf("listen %q: port must be an integer between 1 and 65535", c.Listen)
 	}
 	if c.Aggregate != "" && !aggregateNameRE.MatchString(c.Aggregate) {

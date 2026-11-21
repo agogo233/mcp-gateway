@@ -57,16 +57,30 @@ func (l *authLimiter) recordFailure(ip string, rl AuthRateLimitConfig, now time.
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.fails) >= maxTrackedIPs {
-		l.sweepLocked(rl, now)
-	}
 	r := l.fails[ip]
 	if r == nil {
+		if len(l.fails) >= maxTrackedIPs {
+			l.sweepLocked(rl, now)
+		}
+		if len(l.fails) >= maxTrackedIPs {
+			// Hard cap: a distributed flood with more distinct sources than
+			// the cap must not grow memory without bound. New sources still
+			// get their plain 401, they are just not tracked until room
+			// frees up.
+			return false, false, 0
+		}
 		r = &failRecord{}
 		l.fails[ip] = r
 	}
 	if r.blockedUntil.After(now) {
 		return true, false, r.count
+	}
+	// A source that just came off a block starts from a clean window, so a
+	// blockMs shorter than the window cannot chain new blocks from residual
+	// counts.
+	if !r.blockedUntil.IsZero() && !r.blockedUntil.After(now) {
+		r.count = 0
+		r.windowStart = now
 	}
 	window := time.Duration(rl.WindowMs) * time.Millisecond
 	if r.windowStart.IsZero() || now.Sub(r.windowStart) > window {
