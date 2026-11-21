@@ -1677,3 +1677,35 @@ func TestSyncBudgetExceeded(t *testing.T) {
 	}
 	t.Fatalf("catalog never mirrored after the upstream sped up, tools=%d", tools)
 }
+
+// TestBearerToken pins the Authorization header parsing edge cases: the
+// scheme is case-insensitive, the value is kept verbatim, and malformed
+// headers yield an empty token.
+func TestBearerToken(t *testing.T) {
+	mk := func(header string) *http.Request {
+		req, err := http.NewRequest(http.MethodPost, "/mcp/test", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header != "" {
+			req.Header.Set("Authorization", header)
+		}
+		return req
+	}
+	cases := []struct{ header, want string }{
+		{"", ""},
+		{"Bearer", ""},
+		{"Bearer ", ""},
+		{"Bearer abc", "abc"},
+		{"bearer abc", "abc"},
+		{"BEARER abc", "abc"},
+		{"Basic abc", ""},
+		{"BearerX abc", ""},
+		{"Bearer  spaced  ", " spaced  "},
+	}
+	for _, c := range cases {
+		if got := bearerToken(mk(c.header)); got != c.want {
+			t.Errorf("bearerToken(%q) = %q, want %q", c.header, got, c.want)
+		}
+	}
+}

@@ -23,6 +23,12 @@ services:
     # 镜像默认 USER app（非 root）；宿主机 gateway.json 为 0600，控制台
     # 持久化（保存/启停写盘）需要写权限，故以 root 运行本容器。
     user: "0:0"
+    # 加固：禁止提权并丢弃全部 Linux capabilities。配置目录为 root 属主的
+    # bind mount，owner 写权限不依赖任何 capability；healthcheck 的 wget
+    # 只需普通网络栈，均不受影响。
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       github-mcp:
         condition: service_healthy

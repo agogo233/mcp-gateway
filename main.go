@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-var version = "0.3.0"
+var version = "0.4.0"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)

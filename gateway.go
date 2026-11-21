@@ -386,9 +386,11 @@ func clientIP(r *http.Request) string {
 func (g *gateway) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	// Inline styles are used by the console markup; scripts stay same-origin
-	// only (no inline script exists).
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'")
+	// only (no inline script exists). object/base/frame sources are closed
+	// off as defense in depth.
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 
 	if r.URL.Path == "/healthz" {
 		g.handleHealth(w, r)
