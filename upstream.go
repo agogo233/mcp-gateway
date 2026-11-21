@@ -339,13 +339,18 @@ func listPaginated[T any](u *upstream, ctx context.Context, section string, fetc
 
 // syncCatalog lists the upstream catalog (only sections the upstream
 // declares) and mirrors it into the local server. A failing section is
-// cleared on its own; it does not affect the other sections.
+// cleared on its own; it does not affect the other sections. One overall
+// budget bounds the whole sync: when it expires the previous catalog is
+// kept (a huge catalog must not stall the probe loop nor wipe a working
+// mirror), and each page still honors its own listTimeoutMs.
 func (u *upstream) syncCatalog(ctx context.Context, s *mcp.ClientSession) {
+	sctx, cancel := context.WithTimeout(ctx, u.gw.config().syncBudget())
+	defer cancel()
 	caps := s.InitializeResult().Capabilities
 
 	tools := map[string]*mcp.Tool{}
 	if caps != nil && caps.Tools != nil {
-		items, ok := listPaginated(u, ctx, "tools", func(ctx context.Context, cursor string) ([]*mcp.Tool, string, error) {
+		items, ok := listPaginated(u, sctx, "tools", func(ctx context.Context, cursor string) ([]*mcp.Tool, string, error) {
 			res, err := s.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
 			if err != nil {
 				return nil, "", err
@@ -365,7 +370,7 @@ func (u *upstream) syncCatalog(ctx context.Context, s *mcp.ClientSession) {
 
 	prompts := map[string]*mcp.Prompt{}
 	if caps != nil && caps.Prompts != nil {
-		items, ok := listPaginated(u, ctx, "prompts", func(ctx context.Context, cursor string) ([]*mcp.Prompt, string, error) {
+		items, ok := listPaginated(u, sctx, "prompts", func(ctx context.Context, cursor string) ([]*mcp.Prompt, string, error) {
 			res, err := s.ListPrompts(ctx, &mcp.ListPromptsParams{Cursor: cursor})
 			if err != nil {
 				return nil, "", err
@@ -382,7 +387,7 @@ func (u *upstream) syncCatalog(ctx context.Context, s *mcp.ClientSession) {
 
 	resources := map[string]*mcp.Resource{}
 	if caps != nil && caps.Resources != nil {
-		items, ok := listPaginated(u, ctx, "resources", func(ctx context.Context, cursor string) ([]*mcp.Resource, string, error) {
+		items, ok := listPaginated(u, sctx, "resources", func(ctx context.Context, cursor string) ([]*mcp.Resource, string, error) {
 			res, err := s.ListResources(ctx, &mcp.ListResourcesParams{Cursor: cursor})
 			if err != nil {
 				return nil, "", err
@@ -397,6 +402,14 @@ func (u *upstream) syncCatalog(ctx context.Context, s *mcp.ClientSession) {
 		}
 	}
 
+	if err := sctx.Err(); err != nil {
+		log.Printf("upstream %q: catalog sync exceeded budget %s; keeping previous catalog", u.cfg.Name, u.gw.config().syncBudget())
+		u.gw.logs.add(logEntry{
+			Time: time.Now(), Kind: "event", Event: "sync-budget",
+			Upstream: u.cfg.Name, Detail: "catalog sync exceeded budget; keeping previous catalog",
+		})
+		return
+	}
 	u.reconcile(tools, prompts, resources)
 }
 

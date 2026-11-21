@@ -212,6 +212,11 @@ type Config struct {
 	// ListTimeoutMs bounds each ping / tools / prompts / resources list
 	// request. It is applied per request, not per catalog sync.
 	ListTimeoutMs int `json:"listTimeoutMs,omitempty"`
+	// SyncBudgetMs bounds one full catalog sync (all sections together) per
+	// probe. When the budget expires the previous catalog is kept and a
+	// warning is logged, so a huge catalog cannot stall the probe loop and
+	// delay down-detection. Zero means 30000.
+	SyncBudgetMs int `json:"syncBudgetMs,omitempty"`
 	// FailureThreshold is the number of consecutive failed probes before an
 	// upstream is marked down and its session is retired.
 	FailureThreshold int `json:"failureThreshold,omitempty"`
@@ -276,6 +281,9 @@ func (c *Config) applyDefaults() {
 	if c.ListTimeoutMs <= 0 {
 		c.ListTimeoutMs = 3000
 	}
+	if c.SyncBudgetMs <= 0 {
+		c.SyncBudgetMs = 30000
+	}
 	if c.FailureThreshold <= 0 {
 		c.FailureThreshold = 2
 	}
@@ -311,6 +319,10 @@ func (c *Config) connectTimeout() time.Duration {
 
 func (c *Config) listTimeout() time.Duration {
 	return time.Duration(c.ListTimeoutMs) * time.Millisecond
+}
+
+func (c *Config) syncBudget() time.Duration {
+	return time.Duration(c.SyncBudgetMs) * time.Millisecond
 }
 
 func (c *Config) shutdownTimeout() time.Duration {

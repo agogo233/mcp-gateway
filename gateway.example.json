@@ -5,6 +5,7 @@
   "autoDisableAfter": 10,
   "connectTimeoutMs": 3000,
   "listTimeoutMs": 3000,
+  "syncBudgetMs": 30000,
   "failureThreshold": 2,
   "shutdownTimeoutMs": 5000,
   "aggregate": "all",

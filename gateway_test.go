@@ -1561,3 +1561,119 @@ func TestQuarantineStopsProbing(t *testing.T) {
 		t.Fatal("probing did not resume after re-enable")
 	}
 }
+
+// slowListUpstream is a minimal legacy MCP server whose tools/list reply can
+// be delayed, used to exercise the catalog sync budget end to end.
+type slowListUpstream struct {
+	ts       *httptest.Server
+	delay    atomic.Int64 // nanoseconds; 0 = answer immediately
+	toolHits atomic.Int32
+}
+
+func newSlowListUpstream(t *testing.T) *slowListUpstream {
+	t.Helper()
+	s := &slowListUpstream{}
+	s.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		var msg struct {
+			ID     any    `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal(body, &msg); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if msg.ID == nil {
+			// Notifications expect no response body, just acceptance.
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch msg.Method {
+		case "initialize":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": msg.ID,
+				"result": map[string]any{
+					"protocolVersion": "2025-03-26",
+					"capabilities":    map[string]any{"tools": map[string]any{}},
+					"serverInfo":      map[string]any{"name": "slow", "version": "0.0.1"},
+				},
+			})
+		case "ping":
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": map[string]any{}})
+		case "tools/list":
+			s.toolHits.Add(1)
+			if d := s.delay.Load(); d > 0 {
+				time.Sleep(time.Duration(d))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": msg.ID,
+				"result": map[string]any{"tools": []map[string]any{{
+					"name":        "echo",
+					"description": "echoes its input",
+					"inputSchema": map[string]any{"type": "object"},
+				}}},
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": msg.ID,
+				"error": map[string]any{"code": -32601, "message": "method not found: " + msg.Method},
+			})
+		}
+	}))
+	t.Cleanup(s.ts.Close)
+	return s
+}
+
+// TestSyncBudgetExceeded: when one catalog sync exceeds syncBudgetMs, the
+// previous catalog is kept (not wiped) and the upstream stays up; once the
+// upstream answers fast again the catalog mirrors normally.
+func TestSyncBudgetExceeded(t *testing.T) {
+	slow := newSlowListUpstream(t)
+	slow.delay.Store(int64(300 * time.Millisecond))
+
+	cfg := testConfig(slow.ts.URL)
+	cfg.SyncBudgetMs = 100 // smaller than one delayed tools/list
+	gw := startGateway(t, cfg)
+	waitForState(t, gw.URL+"/healthz", "test", "up", 5*time.Second)
+
+	health := func() (string, int) {
+		resp, err := http.Get(gw.URL + "/healthz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var h healthResponse
+		if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+			t.Fatal(err)
+		}
+		if len(h.Upstreams) != 1 {
+			t.Fatalf("expected one upstream in the health document, got %+v", h.Upstreams)
+		}
+		return h.Upstreams[0].State, h.Upstreams[0].Tools
+	}
+
+	state, tools := health()
+	if state != "up" || tools != 0 {
+		t.Fatalf("budget-exceeded sync must keep the (empty) previous catalog and stay up, got state=%s tools=%d", state, tools)
+	}
+
+	// Once the upstream answers fast again the catalog mirrors normally.
+	slow.delay.Store(0)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, tools = health(); tools == 1 {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("catalog never mirrored after the upstream sped up, tools=%d", tools)
+}

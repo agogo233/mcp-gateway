@@ -26,6 +26,7 @@
 | 上游恢复 | 一个探测周期(默认15s)内自动重新镜像 |
 | 上游不支持 prompts/resources | 按能力声明裁剪列举，不会因此误判 down；对应分节返回空 |
 | 某分节列举失败 | 只清空该分节，不影响其他分节 |
+| 目录同步超 `syncBudgetMs` | 保留旧目录并记一条告警，不误判 down；下个探测周期自动重试 |
 | 调用超时 | 按上游 `callTimeoutMs`（默认 60s；x64dbg 300s），每次列举请求独立计时 |
 
 ## 配置热更新
@@ -58,6 +59,7 @@
 - `autoDisableAfter`：连续失败自动熔断阈值，默认 0（关闭）。达到次数后上游进入"已自动禁用"（quarantined）运行态：完全停止探测，直至通过控制台"启用"按钮、修改该上游配置或重启进程恢复；该状态只存在于内存，不写回 gateway.json
 - `connectTimeoutMs`：与上游 initialize 握手超时，默认 3000
 - `listTimeoutMs`：单次 ping/列举请求超时，默认 3000
+- `syncBudgetMs`：单轮目录同步（三节合计）总预算，默认 30000。超预算保留旧目录并告警，避免超大目录拖延故障发现；每页请求仍受 `listTimeoutMs` 约束
 - `failureThreshold`：连续失败阈值，默认 2
 - `shutdownTimeoutMs`：优雅停机宽限，默认 5000
 - `aggregate`：聚合端点路径段（如 `"all"` → `/mcp/all`），缺省关闭
