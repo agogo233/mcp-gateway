@@ -8,7 +8,8 @@ const TOKEN_KEY = 'mcp-gateway-console-token';
 let token = localStorage.getItem(TOKEN_KEY) || '';
 let activeTab = 'health';
 let health = null;
-let catalogCache = { upstream: '', tools: [], prompts: [], resources: [] };
+let catalogCache = { upstream: '', tools: [], prompts: [], resources: [], total: { tools: 0, prompts: 0, resources: 0 } };
+let configuredListen = ''; // listen value from /api/config, to spot drift vs the bound address
 let authTokens = [];   // [{name, fingerprint?, token?}] token only for new entries
 let consoleTokens = []; // [{fingerprint?, token?}]
 let refreshTimer = null;
@@ -97,6 +98,14 @@ function renderHealth(h) {
   $('#hUpstreams').innerHTML = esc(String(upCount)) +
     ' <span style="font-size:14px;color:var(--muted)">/ ' + esc(String(act.length)) + ' 正常</span>';
   $('#hUpstreamsSub').textContent = (act.length - upCount) > 0 ? (act.length - upCount) + ' 个上游已标记 down' : '全部上游正常';
+  const listenEl = $('#hListen');
+  if (listenEl) listenEl.textContent = h.listen ? '实际监听地址：' + h.listen : '';
+  const lw = $('#listenWarn');
+  if (lw) {
+    const drift = configuredListen && h.listen && configuredListen !== h.listen;
+    lw.classList.toggle('hidden', !drift);
+    if (drift) lw.textContent = '⚠ 配置的监听地址 ' + esc(configuredListen) + ' 尚未生效，当前实际监听 ' + esc(h.listen) + '（listen 变更需要重启进程）';
+  }
   if (h.aggregate) {
     $('#hAgg').textContent = '/mcp/' + h.aggregate.name;
     $('#hAggSub').textContent = '聚合端点已启用';
@@ -168,23 +177,72 @@ function catalogTable(id, rows, empty) {
       '</pre></details></td></tr>').join('');
 }
 
+const CATALOG_PAGE = 1000;
+
+async function fetchCatalogSection(up, section, q, offset) {
+  return api('/api/catalog?upstream=' + encodeURIComponent(up) + '&section=' + section +
+    '&limit=' + CATALOG_PAGE + '&offset=' + offset + '&q=' + encodeURIComponent(q));
+}
+
 async function loadCatalog() {
   const up = $('#catUp').value;
   const q = $('#catQ').value.trim();
-  if (!up) { catalogCache = { upstream: '', tools: [], prompts: [], resources: [] }; }
-  else {
+  if (!up) {
+    catalogCache = { upstream: '', tools: [], prompts: [], resources: [], total: { tools: 0, prompts: 0, resources: 0 } };
+  } else {
     try {
-      const [t, p, r] = await Promise.all(['tools', 'prompts', 'resources'].map(s =>
-        api('/api/catalog?upstream=' + encodeURIComponent(up) + '&section=' + s + '&limit=1000&q=' + encodeURIComponent(q))));
-      catalogCache = { upstream: up, tools: t.items, prompts: p.items, resources: r.items };
+      const sections = ['tools', 'prompts', 'resources'];
+      const results = await Promise.all(sections.map(s => fetchCatalogSection(up, s, q, 0)));
+      // 请求期间切换上游/搜索词时丢弃过期结果
+      if (up !== $('#catUp').value || q !== $('#catQ').value.trim()) return;
+      catalogCache = { upstream: up, total: {} };
+      sections.forEach((s, i) => {
+        catalogCache[s] = results[i].items || [];
+        catalogCache.total[s] = results[i].total || 0;
+      });
     } catch (e) {
       if (e.message !== 'unauthorized') toast('目录加载失败: ' + e.message, 'err');
       return;
     }
   }
+  renderCatalog();
+}
+
+async function loadMore(section) {
+  const up = $('#catUp').value;
+  if (!up) return;
+  const q = $('#catQ').value.trim();
+  const btn = $('#more' + section[0].toUpperCase() + section.slice(1));
+  btn.disabled = true;
+  try {
+    const res = await fetchCatalogSection(up, section, q, catalogCache[section].length);
+    if (up !== $('#catUp').value || q !== $('#catQ').value.trim()) return;
+    catalogCache[section] = catalogCache[section].concat(res.items || []);
+    catalogCache.total[section] = res.total || catalogCache.total[section];
+  } catch (e) {
+    if (e.message !== 'unauthorized') toast('目录加载失败: ' + e.message, 'err');
+    return;
+  } finally {
+    btn.disabled = false;
+  }
+  renderCatalog();
+}
+
+function renderCatalog() {
   catalogTable('#toolsTable', catalogCache.tools, '无匹配工具（或上游 down，目录已清空）');
   catalogTable('#promptsTable', catalogCache.prompts, '无匹配 prompts');
   catalogTable('#resourcesTable', catalogCache.resources, '无匹配 resources');
+  updateMoreButtons();
+}
+
+function updateMoreButtons() {
+  ['tools', 'prompts', 'resources'].forEach(s => {
+    const btn = $('#more' + s[0].toUpperCase() + s.slice(1));
+    const loaded = (catalogCache[s] || []).length;
+    const total = (catalogCache.total && catalogCache.total[s]) || 0;
+    btn.hidden = loaded >= total;
+    btn.textContent = '加载更多（已显示 ' + loaded + ' / 共 ' + total + '）';
+  });
 }
 
 /* ---------- config ---------- */
@@ -228,6 +286,7 @@ async function loadConfig() {
     return;
   }
   $('#cfgListen').value = cfg.listen || '';
+  configuredListen = cfg.listen || '';
   $('#cfgAggregate').value = cfg.aggregate || '';
   $('#cfgProbe').value = cfg.probeIntervalMs;
   $('#cfgMaxProbe').value = cfg.maxProbeIntervalMs;
@@ -406,6 +465,9 @@ $('#btnReloadCfg').addEventListener('click', reloadConfig);
 $('#btnRefreshLogs').addEventListener('click', loadLogs);
 $('#logType').addEventListener('change', loadLogs);
 $('#catUp').addEventListener('change', loadCatalog);
+$('#moreTools').addEventListener('click', () => loadMore('tools'));
+$('#morePrompts').addEventListener('click', () => loadMore('prompts'));
+$('#moreResources').addEventListener('click', () => loadMore('resources'));
 $('#catQ').addEventListener('input', () => {
   clearTimeout(catalogTimer);
   catalogTimer = setTimeout(loadCatalog, 300);

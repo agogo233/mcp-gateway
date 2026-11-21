@@ -27,12 +27,14 @@
 <main>
   <!-- ===== 健康总览 ===== -->
   <section id="tab-health">
+    <div class="warnbox hidden" id="listenWarn"></div>
     <div class="cards">
       <div class="card"><div class="label">运行状态</div><div class="value" id="hStatus">…</div><div class="sub" id="hTime"></div></div>
       <div class="card"><div class="label">运行时长</div><div class="value" id="hUptime">…</div><div class="sub">自进程启动</div></div>
       <div class="card"><div class="label">上游</div><div class="value" id="hUpstreams">…</div><div class="sub" id="hUpstreamsSub"></div></div>
       <div class="card"><div class="label">聚合端点</div><div class="value" id="hAgg">…</div><div class="sub" id="hAggSub"></div></div>
     </div>
+    <div class="muted" id="hListen"></div>
     <h2>上游健康</h2>
     <div id="upHealthList"></div>
     <div class="muted" style="margin-top:8px">本页每 5 秒自动刷新。</div>
@@ -46,8 +48,11 @@
       <span class="muted">数据来自网关本地镜像目录（探测周期同步）</span>
     </div>
     <h2>Tools</h2><table id="toolsTable"></table>
+    <div style="text-align:center;margin:6px 0 14px"><button class="ghost" id="moreTools" hidden type="button">加载更多</button></div>
     <h2>Prompts</h2><table id="promptsTable"></table>
+    <div style="text-align:center;margin:6px 0 14px"><button class="ghost" id="morePrompts" hidden type="button">加载更多</button></div>
     <h2>Resources</h2><table id="resourcesTable"></table>
+    <div style="text-align:center;margin:6px 0 14px"><button class="ghost" id="moreResources" hidden type="button">加载更多</button></div>
   </section>
 
   <!-- ===== 配置管理 ===== -->

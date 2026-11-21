@@ -40,6 +40,12 @@ type gateway struct {
 	authFails    *authLimiter
 	consoleFails *authLimiter
 
+	// listen is the address the HTTP server actually bound to at startup.
+	// It is surfaced via /api/health so the console can show drift between
+	// the configured listen value and the effective one (listen changes
+	// need a restart).
+	listen atomic.Pointer[string]
+
 	mu        sync.RWMutex
 	upstreams map[string]*upstream
 	aggregate *aggregate
@@ -66,6 +72,17 @@ func newGateway(cfg *Config, version string) *gateway {
 }
 
 func (g *gateway) config() *Config { return g.cfg.Load() }
+
+// setListen records the address the HTTP server actually bound to.
+func (g *gateway) setListen(addr string) { g.listen.Store(&addr) }
+
+// effectiveListen returns the bound address, or "" when unknown (tests).
+func (g *gateway) effectiveListen() string {
+	if a := g.listen.Load(); a != nil {
+		return *a
+	}
+	return ""
+}
 
 // start launches one probe loop per enabled upstream plus the aggregate sync
 // loop.
@@ -480,6 +497,7 @@ func (g *gateway) healthDocument(authorized bool) healthResponse {
 		Version:   g.version,
 		Uptime:    time.Since(g.startTime).Round(time.Second).String(),
 		Time:      time.Now().UTC().Format(time.RFC3339),
+		Listen:    g.effectiveListen(),
 		Upstreams: []upstreamHealth{},
 	}
 	if !authorized {
@@ -518,6 +536,7 @@ type healthResponse struct {
 	Status    string           `json:"status"`
 	Version   string           `json:"version,omitempty"`
 	Uptime    string           `json:"uptime"`
+	Listen    string           `json:"listen,omitempty"`
 	Aggregate *aggregateHealth `json:"aggregate,omitempty"`
 	Upstreams []upstreamHealth `json:"upstreams,omitempty"`
 	Time      string           `json:"time"`
