@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // webFiles holds the embedded management console; webRoot is the subtree
@@ -84,8 +85,25 @@ func (g *gateway) serveAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "console api is disabled: configure console.tokens in gateway.json", http.StatusForbidden)
 		return
 	}
+	// Throttle blocked sources before any token comparison, so a blocked
+	// caller cannot use the 401/429/200 difference to verify a guessed
+	// console token. Counters are independent of the /mcp/* limiter.
+	ip := clientIP(r)
+	rl := g.config().authRateLimit()
+	if b, retry := g.consoleFails.blocked(ip, rl, time.Now()); b {
+		writeTooManyRequests(w, retry)
+		return
+	}
 	if _, ok := g.authorizeConsole(r); !ok {
-		log.Printf("console: unauthorized %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+		b, shouldLog, total := g.consoleFails.recordFailure(ip, rl, time.Now())
+		if b {
+			// Raced into the block window between the two checks.
+			writeTooManyRequests(w, retryAfter(rl))
+			return
+		}
+		if shouldLog {
+			log.Printf("console: unauthorized %s %s from %s (failures=%d/%d)", r.Method, r.URL.Path, r.RemoteAddr, total, rl.MaxFails)
+		}
 		w.Header().Set("WWW-Authenticate", `Bearer realm="mcp-gateway console"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -224,19 +242,20 @@ type upstreamView struct {
 }
 
 type configView struct {
-	Listen             string         `json:"listen"`
-	ProbeIntervalMs    int            `json:"probeIntervalMs"`
-	MaxProbeIntervalMs int            `json:"maxProbeIntervalMs"`
-	AutoDisableAfter   int            `json:"autoDisableAfter"`
-	ConnectTimeoutMs   int            `json:"connectTimeoutMs"`
-	ListTimeoutMs      int            `json:"listTimeoutMs"`
-	FailureThreshold   int            `json:"failureThreshold"`
-	ShutdownTimeoutMs  int            `json:"shutdownTimeoutMs"`
-	Aggregate          string         `json:"aggregate,omitempty"`
-	WatchConfig        bool           `json:"watchConfig"`
-	Auth               *authView      `json:"auth,omitempty"`
-	Console            *authView      `json:"console,omitempty"`
-	Upstreams          []upstreamView `json:"upstreams"`
+	Listen             string             `json:"listen"`
+	ProbeIntervalMs    int                `json:"probeIntervalMs"`
+	MaxProbeIntervalMs int                `json:"maxProbeIntervalMs"`
+	AutoDisableAfter   int                `json:"autoDisableAfter"`
+	ConnectTimeoutMs   int                `json:"connectTimeoutMs"`
+	ListTimeoutMs      int                `json:"listTimeoutMs"`
+	FailureThreshold   int                `json:"failureThreshold"`
+	ShutdownTimeoutMs  int                `json:"shutdownTimeoutMs"`
+	Aggregate          string             `json:"aggregate,omitempty"`
+	WatchConfig        bool               `json:"watchConfig"`
+	Auth               *authView          `json:"auth,omitempty"`
+	Console            *authView          `json:"console,omitempty"`
+	AuthRateLimit      *AuthRateLimitConfig `json:"authRateLimit,omitempty"`
+	Upstreams          []upstreamView     `json:"upstreams"`
 }
 
 func authViewOf(a *AuthConfig) *authView {
@@ -268,6 +287,7 @@ func (g *gateway) handleAPIConfigGet(w http.ResponseWriter, r *http.Request) {
 		WatchConfig:        cfg.watchEnabled(),
 		Auth:               authViewOf(cfg.Auth),
 		Console:            authViewOf(cfg.Console),
+		AuthRateLimit:      cloneRateLimit(cfg.AuthRateLimit),
 		Upstreams:          []upstreamView{},
 	}
 	for _, u := range cfg.Upstreams {
@@ -307,7 +327,10 @@ type configEdit struct {
 	// "null" (delete the section) and an object with a tokens list.
 	AuthRaw    *json.RawMessage `json:"auth"`
 	ConsoleRaw *json.RawMessage `json:"console"`
-	Upstreams  []upstreamEdit   `json:"upstreams"`
+	// AuthRateLimit replaces the throttle section wholesale when present
+	// (zero fields mean defaults); when absent the current section is kept.
+	AuthRateLimit *AuthRateLimitConfig `json:"authRateLimit,omitempty"`
+	Upstreams     []upstreamEdit       `json:"upstreams"`
 }
 
 type upstreamEdit struct {
@@ -379,6 +402,7 @@ func buildEditedConfig(cur *Config, e *configEdit) (*Config, []string, error) {
 		WatchConfig:        cur.WatchConfig,
 		Auth:               cloneAuth(cur.Auth),
 		Console:            cloneAuth(cur.Console),
+		AuthRateLimit:      cloneRateLimit(cur.AuthRateLimit),
 		Upstreams:          cloneUpstreams(cur.Upstreams),
 	}
 	if e.Listen != nil {
@@ -410,6 +434,10 @@ func buildEditedConfig(cur *Config, e *configEdit) (*Config, []string, error) {
 	}
 	if e.WatchConfig != nil {
 		nc.WatchConfig = e.WatchConfig
+	}
+
+	if e.AuthRateLimit != nil {
+		nc.AuthRateLimit = cloneRateLimit(e.AuthRateLimit)
 	}
 
 	if e.AuthRaw != nil {
@@ -539,6 +567,15 @@ func cloneAuth(a *AuthConfig) *AuthConfig {
 	c := &AuthConfig{Tokens: make([]AuthClient, len(a.Tokens))}
 	copy(c.Tokens, a.Tokens)
 	return c
+}
+
+// cloneRateLimit shallow-copies the throttle section (value fields only).
+func cloneRateLimit(r *AuthRateLimitConfig) *AuthRateLimitConfig {
+	if r == nil {
+		return nil
+	}
+	c := *r
+	return &c
 }
 
 // cloneUpstreams deep-copies the upstream list. Headers maps are duplicated

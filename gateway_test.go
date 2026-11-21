@@ -81,7 +81,9 @@ func newFakeUpstream(t *testing.T, withPromptsAndResources bool) *fakeUpstream {
 
 func testConfig(url string) *Config {
 	return &Config{
-		Listen:             ":0",
+		// ":9200" keeps the config valid for console saves; httptest does
+		// not actually bind this address.
+		Listen:             ":9200",
 		ProbeIntervalMs:    50,
 		MaxProbeIntervalMs: 100, // keep backoff from slowing recovery tests
 		ConnectTimeoutMs:   500,
@@ -464,7 +466,7 @@ func TestAggregateEndpoint(t *testing.T) {
 	f1 := newFakeUpstream(t, false) // tools only
 	f2 := newFakeUpstream(t, true)  // tools + prompts + resources
 	cfg := &Config{
-		Listen:           ":0",
+		Listen:           ":9200",
 		ProbeIntervalMs:  50,
 		ConnectTimeoutMs: 500,
 		ListTimeoutMs:    500,
@@ -573,7 +575,7 @@ func TestHotReload(t *testing.T) {
 	writeCfg := func(upstreams []UpstreamConfig, probeInterval int) {
 		t.Helper()
 		cfg := Config{
-			Listen:           ":0",
+			Listen:           ":9200",
 			ProbeIntervalMs:  probeInterval,
 			ConnectTimeoutMs: 500,
 			ListTimeoutMs:    500,
@@ -956,7 +958,7 @@ func TestAuthHotReloadRotate(t *testing.T) {
 		for i, tok := range tokens {
 			quoted[i] = fmt.Sprintf("%q", tok)
 		}
-		body := fmt.Sprintf(`{"listen":":0","probeIntervalMs":50,"connectTimeoutMs":500,"listTimeoutMs":500,"failureThreshold":2,"watchConfig":false,"auth":{"tokens":[%s]},"upstreams":[{"name":"test","url":%q}]}`, strings.Join(quoted, ","), fake.ts.URL)
+		body := fmt.Sprintf(`{"listen":":9200","probeIntervalMs":50,"connectTimeoutMs":500,"listTimeoutMs":500,"failureThreshold":2,"watchConfig":false,"auth":{"tokens":[%s]},"upstreams":[{"name":"test","url":%q}]}`, strings.Join(quoted, ","), fake.ts.URL)
 		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -995,6 +997,56 @@ func TestAuthHotReloadRotate(t *testing.T) {
 	defer rcancel()
 	if _, err := cs.ListTools(rctx, nil); err != nil {
 		t.Fatalf("new token must be accepted after rotation: %v", err)
+	}
+}
+
+// TestAuthRateLimit: repeated failed authentications from one source trip a
+// per-IP block (429, even for the valid token and for missing tokens), while
+// /healthz stays reachable. The settings come from the authRateLimit config
+// section, so tests can use small thresholds.
+func TestAuthRateLimit(t *testing.T) {
+	fake := newFakeUpstream(t, false)
+	cfg := authTestConfig(fake.ts.URL, authTokenA)
+	cfg.AuthRateLimit = &AuthRateLimitConfig{WindowMs: 60000, MaxFails: 3, BlockMs: 60000}
+	gw := startGateway(t, cfg)
+	waitForState(t, gw.URL+"/healthz", "test", "up", 5*time.Second, authTokenA)
+
+	endpoint := gw.URL + "/mcp/test"
+	for i := 1; i <= 3; i++ {
+		if got := postStatus(t, endpoint, "bogus-token-0123456789"); got != http.StatusUnauthorized {
+			t.Fatalf("failure %d: expected 401 before the limit trips, got %d", i, got)
+		}
+	}
+	if got := postStatus(t, endpoint, authTokenA); got != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 for the valid token once the limit trips, got %d", got)
+	}
+	if got := postStatus(t, endpoint, ""); got != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 for a missing token while blocked, got %d", got)
+	}
+
+	resp, err := http.Get(gw.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz must stay open while /mcp is throttled, got %d", resp.StatusCode)
+	}
+}
+
+// TestAuthRateLimitDisabled: "disabled": true turns the throttle off, so
+// failed attempts keep answering plain 401.
+func TestAuthRateLimitDisabled(t *testing.T) {
+	fake := newFakeUpstream(t, false)
+	cfg := authTestConfig(fake.ts.URL, authTokenA)
+	cfg.AuthRateLimit = &AuthRateLimitConfig{Disabled: true, MaxFails: 1}
+	gw := startGateway(t, cfg)
+	waitForState(t, gw.URL+"/healthz", "test", "up", 5*time.Second, authTokenA)
+
+	for i := 1; i <= 5; i++ {
+		if got := postStatus(t, gw.URL+"/mcp/test", "bogus-token-0123456789"); got != http.StatusUnauthorized {
+			t.Fatalf("failure %d: expected plain 401 with the throttle disabled, got %d", i, got)
+		}
 	}
 }
 
@@ -1107,7 +1159,7 @@ func TestAggregatePrefixConflictRouting(t *testing.T) {
 	tsAB := newFake("c", "from:a_b:c")
 
 	cfg := &Config{
-		Listen:           ":0",
+		Listen:           ":9200",
 		ProbeIntervalMs:  50,
 		ConnectTimeoutMs: 500,
 		ListTimeoutMs:    500,
@@ -1171,7 +1223,7 @@ func TestShutdownRacesWithReload(t *testing.T) {
 			ups = append(ups, UpstreamConfig{Name: n, URL: urls[n]})
 		}
 		cfg := Config{
-			Listen:           ":0",
+			Listen:           ":9200",
 			ProbeIntervalMs:  50,
 			ConnectTimeoutMs: 500,
 			ListTimeoutMs:    500,

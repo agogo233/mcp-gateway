@@ -123,6 +123,52 @@ func (a *AuthConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Default settings for the per-IP authentication failure throttle.
+const (
+	defaultFailWindowMs = 60000 // counting window: 1 minute
+	defaultMaxFails     = 10    // failures per window before a block
+	defaultFailBlockMs  = 60000 // block duration once tripped
+)
+
+// AuthRateLimitConfig tunes throttling of failed authentication attempts per
+// source IP. One setting guards both /mcp/* and /api/*; each endpoint keeps
+// its own failure counters. Absent or zero fields mean the defaults.
+type AuthRateLimitConfig struct {
+	// Disabled turns the throttle off. Authentication itself stays on.
+	Disabled bool `json:"disabled,omitempty"`
+	// WindowMs is the length of the failure-counting window. Zero means 60000.
+	WindowMs int `json:"windowMs,omitempty"`
+	// MaxFails is the number of failed attempts within one window that
+	// blocks the source. Zero means 10.
+	MaxFails int `json:"maxFails,omitempty"`
+	// BlockMs is how long a tripped source stays blocked (429). Zero means
+	// 60000.
+	BlockMs int `json:"blockMs,omitempty"`
+}
+
+// authRateLimit returns the effective throttle settings with defaults
+// applied; non-positive values fall back to the defaults as well.
+func (c *Config) authRateLimit() AuthRateLimitConfig {
+	r := AuthRateLimitConfig{
+		WindowMs: defaultFailWindowMs,
+		MaxFails: defaultMaxFails,
+		BlockMs:  defaultFailBlockMs,
+	}
+	if c.AuthRateLimit != nil {
+		if c.AuthRateLimit.WindowMs > 0 {
+			r.WindowMs = c.AuthRateLimit.WindowMs
+		}
+		if c.AuthRateLimit.MaxFails > 0 {
+			r.MaxFails = c.AuthRateLimit.MaxFails
+		}
+		if c.AuthRateLimit.BlockMs > 0 {
+			r.BlockMs = c.AuthRateLimit.BlockMs
+		}
+		r.Disabled = c.AuthRateLimit.Disabled
+	}
+	return r
+}
+
 // principal identifies the credential that authenticated a request: the
 // configured display name for named tokens, or only a fingerprint for
 // anonymous ones. Fingerprints are short irreversible digest prefixes used
@@ -194,6 +240,10 @@ type Config struct {
 	// Auth enables gateway-level bearer authentication for /mcp/* clients
 	// when non-nil.
 	Auth *AuthConfig `json:"auth,omitempty"`
+	// AuthRateLimit throttles failed authentication attempts per source IP
+	// on /mcp/* and /api/* (see AuthRateLimitConfig). Optional; when nil the
+	// defaults apply. Set "disabled": true to turn the throttle off.
+	AuthRateLimit *AuthRateLimitConfig `json:"authRateLimit,omitempty"`
 	// Console enables the management console API (/api/*) with its own,
 	// independent credential list when non-nil and non-empty. Console tokens
 	// must differ from every auth token; reuse is rejected during validation.

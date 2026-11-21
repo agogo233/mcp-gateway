@@ -64,6 +64,7 @@
 - `watchConfig`：是否监听配置文件变化自动热更新，默认 true
 - `auth.tokens`：网关接入鉴权的 Bearer token 列表（可选，见下文"鉴权"）
 - `console.tokens`：管理控制台（`/api/*`）专用 Bearer token 列表（可选，见下文"管理控制台"）
+- `authRateLimit`：认证失败限流（可选，见下文"鉴权"），默认 1 分钟窗口内失败 10 次即封禁该来源 60 秒
 - `upstreams[].callTimeoutMs`：单次调用超时，默认 60000
 - `upstreams[].probeIntervalMs`：该上游的探测周期覆盖（如目录较重的上游可放慢），留空用全局值
 - `upstreams[].enabled`：该上游启停，缺省 true；false 时停止探测、目录与聚合端点剔除、`/mcp/<name>` 404
@@ -109,6 +110,28 @@ healthcheck 使用；携带有效 token 访问 `/healthz` 才返回含上游 URL
 - 比较使用 SHA-256 + 常数时间比较，不泄露 token 内容与长度；
 - **零停机轮换**：把新 token 追加进 `tokens` → 热更新生效 → 客户端切换 → 再删掉旧 token → 再次热更新；
 - token 只放在 gitignore 的 `gateway.json` 与客户端配置里，不要提交、不要写进 `gateway.example.json`（那里只有占位符）。
+
+### 认证失败限流
+
+`/mcp/*` 与 `/api/*` 的认证失败按**来源 IP** 分别限流（两套独立计数，互不连累）：
+默认 1 分钟窗口内失败满 10 次，该来源被封禁 60 秒——封禁期内即使携带正确 token 也返回
+`429`（带 `Retry-After`）。失败日志只记每窗口首次与之后每第 10 次，防止刷爆运行日志。
+封禁状态只在内存，重启即清零。
+
+```json
+{
+  "authRateLimit": {
+    "windowMs": 60000,
+    "maxFails": 10,
+    "blockMs": 60000,
+    "disabled": false
+  }
+}
+```
+
+注意：若网关前置了反向代理，所有请求的来源都是代理地址，限流按代理地址聚合；
+经 NAT 出口共享公网 IP 的用户也存在被牵连封禁 60 秒的可能。这是按来源限流的固有权衡。
+不需要时设 `"disabled": true` 关闭（鉴权本身不受影响）。
 
 客户端（opencode）在对应 mcp 条目里加 headers 即可：
 

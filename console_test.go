@@ -108,6 +108,33 @@ func TestConsoleAuthRequired(t *testing.T) {
 	}
 }
 
+// TestConsoleRateLimit: failed console logins trip their own per-IP block
+// (429), and the console throttle never locks the /mcp/* endpoints (and vice
+// versa) because the two credential lists count independently.
+func TestConsoleRateLimit(t *testing.T) {
+	const downstreamToken = "downstream-token-0123456"
+	_, ts, _ := startConsoleGateway(t, func(cfg *Config) {
+		cfg.AuthRateLimit = &AuthRateLimitConfig{WindowMs: 60000, MaxFails: 3, BlockMs: 60000}
+		cfg.Auth = &AuthConfig{Tokens: []AuthClient{{Name: "opencode", Token: downstreamToken}}}
+	})
+	url := ts.URL + "/api/health"
+	for i := 1; i <= 3; i++ {
+		if resp, _ := apiRequest(t, http.MethodGet, url, "bogus-token-0123456789", ""); resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("failure %d: expected 401, got %d", i, resp.StatusCode)
+		}
+	}
+	if resp, _ := apiRequest(t, http.MethodGet, url, consoleToken, ""); resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 for the valid console token while blocked, got %d", resp.StatusCode)
+	}
+	// The console block must not throttle /mcp/* authentications.
+	if got := postStatus(t, ts.URL+"/mcp/test", "bogus-token-0123456789"); got != http.StatusUnauthorized {
+		t.Fatalf("expected plain 401 on /mcp while the console is blocked, got %d", got)
+	}
+	if got := postStatus(t, ts.URL+"/mcp/test", downstreamToken); got != http.StatusOK {
+		t.Fatalf("expected the valid downstream token to pass while the console is blocked, got %d", got)
+	}
+}
+
 func TestConsoleStaticServedWithoutAuth(t *testing.T) {
 	_, ts, _ := startConsoleGateway(t, nil)
 	for _, path := range []string{"/", "/style.css", "/app.js"} {

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,12 @@ type gateway struct {
 	// logs is the in-memory activity timeline shown in the console.
 	logs *recentLog
 
+	// authFails throttles failed /mcp/* authentications per source IP;
+	// consoleFails does the same for /api/* console authentications. Both
+	// share the authRateLimit settings but count independently.
+	authFails    *authLimiter
+	consoleFails *authLimiter
+
 	mu        sync.RWMutex
 	upstreams map[string]*upstream
 	aggregate *aggregate
@@ -44,10 +51,12 @@ type gateway struct {
 func newGateway(cfg *Config, version string) *gateway {
 	cfg.applyDefaults()
 	g := &gateway{
-		version:   version,
-		startTime: time.Now(),
-		upstreams: make(map[string]*upstream, len(cfg.Upstreams)),
-		logs:      newRecentLog(),
+		version:      version,
+		startTime:    time.Now(),
+		upstreams:    make(map[string]*upstream, len(cfg.Upstreams)),
+		logs:         newRecentLog(),
+		authFails:    newAuthLimiter(),
+		consoleFails: newAuthLimiter(),
 	}
 	g.cfg.Store(cfg)
 	if cfg.Aggregate != "" {
@@ -381,6 +390,25 @@ func (g *gateway) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Without downstream auth there is nothing to brute-force: accept all
+	// (unknown paths 404 below), exactly as before the throttle existed.
+	if !g.config().authEnabled() {
+		if rest, has := strings.CutPrefix(r.URL.Path, "/mcp/"); has {
+			g.serveMCP(w, withPrincipal(r, principal{}, clientIP(r)), rest)
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
+	// Throttle blocked sources before any token comparison, so a blocked
+	// caller cannot use the 401/429/200 difference to verify a guessed
+	// token. Rejection logs are paced per source IP.
+	ip := clientIP(r)
+	rl := g.config().authRateLimit()
+	if b, retry := g.authFails.blocked(ip, rl, time.Now()); b {
+		writeTooManyRequests(w, retry)
+		return
+	}
 	if p, ok := g.authorizeAuth(r); ok {
 		if rest, has := strings.CutPrefix(r.URL.Path, "/mcp/"); has {
 			g.serveMCP(w, withPrincipal(r, p, clientIP(r)), rest)
@@ -389,9 +417,30 @@ func (g *gateway) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	log.Printf("auth: reject %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+	b, shouldLog, total := g.authFails.recordFailure(ip, rl, time.Now())
+	if b {
+		// Raced into the block window between the two checks.
+		writeTooManyRequests(w, retryAfter(rl))
+		return
+	}
+	if shouldLog {
+		log.Printf("auth: reject %s %s from %s (failures=%d/%d)", r.Method, r.URL.Path, r.RemoteAddr, total, rl.MaxFails)
+	}
 	w.Header().Set("WWW-Authenticate", `Bearer realm="mcp-gateway"`)
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
+}
+
+// retryAfter converts the block duration to whole seconds for Retry-After.
+func retryAfter(rl AuthRateLimitConfig) int {
+	return int(time.Duration(rl.BlockMs)*time.Millisecond/time.Second) + 1
+}
+
+// writeTooManyRequests answers an authentication attempt from a source that
+// exceeded the failure limit. No log line here on purpose: blocked sources
+// may retry indefinitely and must not flood the log via the 429 path either.
+func writeTooManyRequests(w http.ResponseWriter, retryAfterSeconds int) {
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+	http.Error(w, "too many requests", http.StatusTooManyRequests)
 }
 
 // serveMCP routes /mcp/<name> to the matching upstream (or aggregate)
