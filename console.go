@@ -242,20 +242,20 @@ type upstreamView struct {
 }
 
 type configView struct {
-	Listen             string             `json:"listen"`
-	ProbeIntervalMs    int                `json:"probeIntervalMs"`
-	MaxProbeIntervalMs int                `json:"maxProbeIntervalMs"`
-	AutoDisableAfter   int                `json:"autoDisableAfter"`
-	ConnectTimeoutMs   int                `json:"connectTimeoutMs"`
-	ListTimeoutMs      int                `json:"listTimeoutMs"`
-	FailureThreshold   int                `json:"failureThreshold"`
-	ShutdownTimeoutMs  int                `json:"shutdownTimeoutMs"`
-	Aggregate          string             `json:"aggregate,omitempty"`
-	WatchConfig        bool               `json:"watchConfig"`
-	Auth               *authView          `json:"auth,omitempty"`
-	Console            *authView          `json:"console,omitempty"`
+	Listen             string               `json:"listen"`
+	ProbeIntervalMs    int                  `json:"probeIntervalMs"`
+	MaxProbeIntervalMs int                  `json:"maxProbeIntervalMs"`
+	AutoDisableAfter   int                  `json:"autoDisableAfter"`
+	ConnectTimeoutMs   int                  `json:"connectTimeoutMs"`
+	ListTimeoutMs      int                  `json:"listTimeoutMs"`
+	FailureThreshold   int                  `json:"failureThreshold"`
+	ShutdownTimeoutMs  int                  `json:"shutdownTimeoutMs"`
+	Aggregate          string               `json:"aggregate,omitempty"`
+	WatchConfig        bool                 `json:"watchConfig"`
+	Auth               *authView            `json:"auth,omitempty"`
+	Console            *authView            `json:"console,omitempty"`
 	AuthRateLimit      *AuthRateLimitConfig `json:"authRateLimit,omitempty"`
-	Upstreams          []upstreamView     `json:"upstreams"`
+	Upstreams          []upstreamView       `json:"upstreams"`
 }
 
 func authViewOf(a *AuthConfig) *authView {
