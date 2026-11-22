@@ -262,19 +262,61 @@ function renderTokens() {
   tokenRows($('#consoleTokenTable'), consoleTokens, false);
 }
 
+const REDACTED = '***'; // matches backend redactedPlaceholder in GET /api/config
+
+// splitAuth separates the (case-insensitively matched) Authorization header
+// from the other upstream headers, so credentials are managed by the
+// dedicated auth control instead of a free-text header line.
+function splitAuth(headers) {
+  const rest = {};
+  let key = '', value = '';
+  Object.entries(headers || {}).forEach(([k, v]) => {
+    if (!key && k.toLowerCase() === 'authorization') { key = k; value = v; return; }
+    rest[k] = v;
+  });
+  return { key, value, rest };
+}
+
+// authState derives the auth control state from a stored Authorization
+// header. Redacted values hide the original scheme and default to the Bearer
+// display; an empty input always keeps the stored value, so that guess never
+// changes what gets saved.
+function authState(key, value) {
+  if (!key) return { type: 'none', val: '', exists: false, origKey: '' };
+  if (value === REDACTED) return { type: 'bearer', val: '', exists: true, origKey: key };
+  if (value.startsWith('Bearer ')) return { type: 'bearer', val: value.slice('Bearer '.length), exists: true, origKey: key };
+  return { type: 'custom', val: value, exists: true, origKey: key };
+}
+
+function authPlaceholder(type, exists) {
+  if (type === 'none') return '';
+  if (type === 'bearer') return exists ? '已配置（值不回显）；留空保持原值，填新 token 则覆盖' : '填 token，自动拼接 Bearer 前缀';
+  return exists ? '已配置（值不回显）；留空保持原值，填新值则覆盖' : '填完整 Authorization 值，如 Basic xxx';
+}
+
 function headerText(headers) {
   return Object.entries(headers || {}).map(([k, v]) => k + ': ' + v).join('\n');
 }
 
 function renderUpstreamCards(ups) {
-  $('#upList').innerHTML = ups.map((u, i) => '<div class="card" style="margin-bottom:12px" data-idx="' + i + '">' +
-    '<div class="row"><div class="field" style="flex:1"><label>name</label><input type="text" class="up-name" value="' + esc(u.name) + '"></div>' +
-    '<div class="field" style="flex:2"><label>url</label><input type="text" class="up-url" value="' + esc(u.url) + '"></div></div>' +
-    '<div class="row"><div class="field" style="flex:1"><label>callTimeoutMs</label><input type="number" class="up-timeout" value="' + esc(u.callTimeoutMs || '') + '" placeholder="60000"></div>' +
-    '<div class="field" style="flex:1"><label>probeIntervalMs（留空=全局）</label><input type="number" class="up-probe" value="' + esc(u.probeIntervalMs || '') + '" placeholder="15000"></div>' +
-    '<div class="field" style="flex:2"><label>headers（每行一条 Key: ***；*** 表示保持不变）</label><textarea class="up-headers" placeholder="Authorization: ***">' + esc(headerText(u.headers)) + '</textarea></div>' +
-    '<label class="muted" style="flex:none;white-space:nowrap"><input type="checkbox" class="up-enabled" ' + (u.enabled !== false ? 'checked' : '') + '> 启用</label>' +
-    '<button class="danger" data-action="del-upstream" data-i="' + i + '" type="button">删除</button></div></div>').join('');
+  $('#upList').innerHTML = ups.map((u, i) => {
+    const sa = splitAuth(u.headers);
+    const a = authState(sa.key, sa.value);
+    return '<div class="card" style="margin-bottom:12px" data-idx="' + i + '"' + (a.exists ? ' data-auth-key="' + esc(a.origKey) + '"' : '') + '>' +
+      '<div class="row"><div class="field" style="flex:1"><label>name</label><input type="text" class="up-name" value="' + esc(u.name) + '"></div>' +
+      '<div class="field" style="flex:2"><label>url</label><input type="text" class="up-url" value="' + esc(u.url) + '"></div></div>' +
+      '<div class="row"><div class="field" style="flex:1"><label>认证方式（上游凭据）</label><select class="up-auth-type" style="width:100%">' +
+        '<option value="none"' + (a.type === 'none' ? ' selected' : '') + '>无</option>' +
+        '<option value="bearer"' + (a.type === 'bearer' ? ' selected' : '') + '>Bearer Token</option>' +
+        '<option value="custom"' + (a.type === 'custom' ? ' selected' : '') + '>自定义 Authorization 值</option>' +
+        '</select></div>' +
+      '<div class="field" style="flex:2"><label>凭据（保存后不回显）</label><input type="text" class="up-auth-val" value="' + esc(a.val) + '" autocomplete="off" spellcheck="false" placeholder="' + esc(authPlaceholder(a.type, a.exists)) + '"' + (a.type === 'none' ? ' disabled' : '') + '></div></div>' +
+      '<div class="row"><div class="field" style="flex:1"><label>callTimeoutMs</label><input type="number" class="up-timeout" value="' + esc(u.callTimeoutMs || '') + '" placeholder="60000"></div>' +
+      '<div class="field" style="flex:1"><label>probeIntervalMs（留空=全局）</label><input type="number" class="up-probe" value="' + esc(u.probeIntervalMs || '') + '" placeholder="15000"></div>' +
+      '<div class="field" style="flex:2"><label>其他 headers（每行一条 Key: Value；*** 表示保持不变；Authorization 请用认证方式配置）</label><textarea class="up-headers" placeholder="X-Client-Name: mcp-gateway">' + esc(headerText(sa.rest)) + '</textarea></div>' +
+      '<label class="muted" style="flex:none;white-space:nowrap"><input type="checkbox" class="up-enabled" ' + (u.enabled !== false ? 'checked' : '') + '> 启用</label>' +
+      '<button class="danger" data-action="del-upstream" data-i="' + i + '" type="button">删除</button></div></div>';
+  }).join('');
 }
 
 async function loadConfig() {
@@ -323,8 +365,22 @@ function collectConfig() {
       if (idx <= 0) return;
       const k = line.slice(0, idx).trim();
       const v = line.slice(idx + 1).trim();
-      if (k && v) headers[k] = v;
+      if (!k || !v) return;
+      if (k.toLowerCase() === 'authorization') return; // owned by the auth control below
+      headers[k] = v;
     });
+    // Compose Authorization from the structured auth control. An empty input
+    // with a stored value sends *** (backend keeps the stored value, under
+    // the original key spelling); type "none" drops the header entirely.
+    const authType = card.querySelector('.up-auth-type').value;
+    const authVal = card.querySelector('.up-auth-val').value.trim();
+    if (authType === 'bearer' && authVal) {
+      headers['Authorization'] = 'Bearer ' + authVal;
+    } else if (authType === 'custom' && authVal) {
+      headers['Authorization'] = authVal;
+    } else if (authType !== 'none' && card.dataset.authKey) {
+      headers[card.dataset.authKey] = REDACTED;
+    }
     edit.upstreams.push({
       name: card.querySelector('.up-name').value.trim(),
       url: card.querySelector('.up-url').value.trim(),
@@ -527,6 +583,16 @@ document.addEventListener('click', e => {
       toggleUpstream(btn.dataset.name, btn.dataset.enabled === 'true');
       break;
   }
+});
+
+/* auth-type select drives the credential input state (cards re-render freely) */
+document.addEventListener('change', e => {
+  if (!e.target.classList || !e.target.classList.contains('up-auth-type')) return;
+  const card = e.target.closest('.card');
+  if (!card) return;
+  const inp = card.querySelector('.up-auth-val');
+  inp.disabled = e.target.value === 'none';
+  inp.placeholder = authPlaceholder(e.target.value, !!card.dataset.authKey);
 });
 
 setAuthBadge();

@@ -98,7 +98,7 @@
       </div>
 
       <div>
-        <h2>上游列表 <span class="tag">upstreams[].headers 为上游凭据，与上述令牌无关</span></h2>
+        <h2>上游列表 <span class="tag">上游凭据 = 认证方式 + 凭据（存于 upstreams[].headers），与上述令牌无关</span></h2>
         <div id="upList"></div>
         <button class="ghost" id="btnAddUpstream" type="button">+ 添加上游</button>
         <h2>保存</h2>
@@ -109,7 +109,7 @@
         </div>
         <div id="saveResult"></div>
         <div class="muted" style="margin-top:10px">
-          保存 = 校验 → 原子写回 gateway.json（需可写挂载）→ 热更新生效。headers 值显示为 ***，保持不变请勿修改；修改上游会重建其连接，进行中的调用可能失败。
+          保存 = 校验 → 原子写回 gateway.json（需可写挂载）→ 热更新生效。凭据与其他 headers 值显示为 ***：留空 = 保持不变，填写 = 覆盖，认证方式选「无」= 删除 Authorization 头；上游改名后 *** 无法沿用，请重新填写凭据。修改上游会重建其连接，进行中的调用可能失败。
         </div>
       </div>
     </div>
