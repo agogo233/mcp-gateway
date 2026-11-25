@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1799,5 +1800,64 @@ func TestHandleToolDropsPoisonedSession(t *testing.T) {
 	case <-u.wake:
 	default:
 		t.Fatal("probe loop must be nudged after dropping a poisoned session")
+	}
+}
+
+// The prompt and resource forwarding paths must treat a poisoned upstream
+// session exactly like the tool path: drop it immediately and nudge the probe
+// loop, instead of serving failures until the failure threshold retires the
+// upstream.
+func TestHandlePromptAndResourceDropPoisonedSession(t *testing.T) {
+	srv := mcp.NewServer(&mcp.Implementation{Name: "fake", Version: "0.0.1"}, nil)
+	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil))
+	t.Cleanup(ts.Close)
+
+	cfg := testConfig(ts.URL)
+	g := newGateway(cfg, "test")
+	u := newUpstream(cfg.Upstreams[0], g)
+
+	s, err := u.connect(context.Background())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	u.setSession(s)
+	s.Close() // poison: every later call fails with ErrConnectionClosed
+
+	if _, err := u.handlePrompt(context.Background(), &mcp.GetPromptRequest{Params: &mcp.GetPromptParams{Name: "p"}}); !errors.Is(err, mcp.ErrConnectionClosed) {
+		t.Fatalf("poisoned session error = %v, want ErrConnectionClosed", err)
+	}
+	if u.currentSession() != nil {
+		t.Fatal("poisoned session must be dropped after a prompt forward")
+	}
+	select {
+	case <-u.wake:
+	default:
+		t.Fatal("probe loop must be nudged after a poisoned prompt forward")
+	}
+
+	// Drain the pending nudge so the resource-phase assertion is meaningful.
+	select {
+	case <-u.wake:
+	default:
+	}
+
+	// Same guarantee for the resource-read forwarding path.
+	s2, err := u.connect(context.Background())
+	if err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	u.setSession(s2)
+	s2.Close()
+
+	if _, err := u.handleResource(context.Background(), &mcp.ReadResourceRequest{Params: &mcp.ReadResourceParams{URI: "file:///x"}}); !errors.Is(err, mcp.ErrConnectionClosed) {
+		t.Fatalf("poisoned session error = %v, want ErrConnectionClosed", err)
+	}
+	if u.currentSession() != nil {
+		t.Fatal("poisoned session must be dropped after a resource forward")
+	}
+	select {
+	case <-u.wake:
+	default:
+		t.Fatal("probe loop must be nudged after a poisoned resource forward")
 	}
 }

@@ -722,6 +722,23 @@ func (u *upstream) logCall(ctx context.Context, kind, name string, start time.Ti
 	log.Printf("call %s %q upstream %q failed dur=%s: %s", kind, name, u.cfg.Name, dur, detail)
 }
 
+// discardIfPoisoned drops the session when err indicates it is permanently
+// unusable (e.g. an upstream that rejects the best-effort cancellation notify
+// the go-sdk sends after a call timeout). Dropping and nudging the probe loop
+// establishes a replacement session immediately instead of serving failures
+// until the next probe tick retires the session; a dropped nudge is harmless
+// because the probe loop's ticker remains a backstop.
+func (u *upstream) discardIfPoisoned(s *mcp.ClientSession, err error) {
+	if !errors.Is(err, mcp.ErrConnectionClosed) {
+		return
+	}
+	u.dropSession(s)
+	select {
+	case u.wake <- struct{}{}:
+	default:
+	}
+}
+
 // handleTool forwards a tools/call to the upstream session. When the upstream
 // is down the call fails fast with an error result instead of hanging.
 func (u *upstream) handleTool(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -741,18 +758,7 @@ func (u *upstream) handleTool(ctx context.Context, req *mcp.CallToolRequest) (*m
 		Arguments: req.Params.Arguments,
 	})
 	if err != nil {
-		// A failed best-effort cancellation notify (e.g. an upstream that
-		// rejects notifications/cancelled) permanently poisons the session's
-		// write side. Drop it and nudge the probe loop so a replacement
-		// session is established immediately instead of serving failures
-		// until the next probe tick.
-		if errors.Is(err, mcp.ErrConnectionClosed) {
-			u.dropSession(s)
-			select {
-			case u.wake <- struct{}{}:
-			default:
-			}
-		}
+		u.discardIfPoisoned(s, err)
 		u.logCall(ctx, "tool", req.Params.Name, start, false, err.Error())
 		return &mcp.CallToolResult{
 			IsError: true,
@@ -776,6 +782,7 @@ func (u *upstream) handlePrompt(ctx context.Context, req *mcp.GetPromptRequest) 
 		Name:      req.Params.Name,
 		Arguments: req.Params.Arguments,
 	})
+	u.discardIfPoisoned(s, err)
 	u.logCall(ctx, "prompt", req.Params.Name, start, err == nil, errText(err))
 	return res, err
 }
@@ -790,6 +797,7 @@ func (u *upstream) handleResource(ctx context.Context, req *mcp.ReadResourceRequ
 	cctx, cancel := context.WithTimeout(ctx, u.cfg.callTimeout())
 	defer cancel()
 	res, err := s.ReadResource(cctx, &mcp.ReadResourceParams{URI: req.Params.URI})
+	u.discardIfPoisoned(s, err)
 	u.logCall(ctx, "resource", req.Params.URI, start, err == nil, errText(err))
 	return res, err
 }
