@@ -41,7 +41,7 @@
     {
       "name": "github",
       "url": "http://github-mcp:8080/mcp",
-      "callTimeoutMs": 120000,
+      "callTimeoutMs": 1900000,
       "probeIntervalMs": 60000,
       "headers": {
         "Authorization": "Bearer <github-mcp-auth-token>",

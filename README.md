@@ -27,7 +27,7 @@
 | 上游不支持 prompts/resources | 按能力声明裁剪列举，不会因此误判 down；对应分节返回空 |
 | 某分节列举失败 | 只清空该分节，不影响其他分节 |
 | 目录同步超 `syncBudgetMs` | 保留旧目录并记一条告警，不误判 down；下个探测周期自动重试 |
-| 调用超时 | 按上游 `callTimeoutMs`（默认 60s；x64dbg 300s），每次列举请求独立计时 |
+| 调用超时 | 按上游 `callTimeoutMs`（默认 60s；x64dbg 300s；github 1900s，容纳 `wait_workflow_run` 最长 30 分钟的阻塞等待），每次调用独立计时 |
 
 ## 配置热更新
 
