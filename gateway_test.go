@@ -1752,3 +1752,52 @@ func TestHealthzRejectsInvalidToken(t *testing.T) {
 		t.Fatalf("headerless healthcheck must stay 200 while blocked, got %d", got)
 	}
 }
+
+// Regression: a poisoned upstream session (e.g. an upstream that rejects the
+// best-effort notifications/cancelled the go-sdk sends after a call timeout)
+// can never recover — every later call fails with "client is closing".
+// handleTool must drop the session immediately so the next probe reconnects
+// instead of serving failures until the failure threshold retires the
+// upstream.
+func TestHandleToolDropsPoisonedSession(t *testing.T) {
+	srv := mcp.NewServer(&mcp.Implementation{Name: "fake", Version: "0.0.1"}, nil)
+	srv.AddTool(&mcp.Tool{Name: "echo", InputSchema: map[string]any{"type": "object"}},
+		func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
+		})
+	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil))
+	t.Cleanup(ts.Close)
+
+	cfg := testConfig(ts.URL)
+	g := newGateway(cfg, "test")
+	u := newUpstream(cfg.Upstreams[0], g)
+
+	s, err := u.connect(context.Background())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	u.setSession(s)
+
+	// Poison the session: closing the client side turns every later call
+	// into ErrConnectionClosed ("connection closed: ... client is closing").
+	s.Close()
+
+	res, err := u.handleTool(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "echo"}})
+	if err != nil {
+		t.Fatalf("handleTool returned a Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected an IsError result after the session was poisoned")
+	}
+	if u.currentSession() != nil {
+		t.Fatal("poisoned session must be dropped so the next probe reconnects immediately")
+	}
+	// The probe loop must be nudged so the replacement session is established
+	// without waiting for the next probe tick (the loop is not running here,
+	// so the buffered nudge is still pending).
+	select {
+	case <-u.wake:
+	default:
+		t.Fatal("probe loop must be nudged after dropping a poisoned session")
+	}
+}

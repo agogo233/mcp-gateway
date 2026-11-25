@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -740,6 +741,18 @@ func (u *upstream) handleTool(ctx context.Context, req *mcp.CallToolRequest) (*m
 		Arguments: req.Params.Arguments,
 	})
 	if err != nil {
+		// A failed best-effort cancellation notify (e.g. an upstream that
+		// rejects notifications/cancelled) permanently poisons the session's
+		// write side. Drop it and nudge the probe loop so a replacement
+		// session is established immediately instead of serving failures
+		// until the next probe tick.
+		if errors.Is(err, mcp.ErrConnectionClosed) {
+			u.dropSession(s)
+			select {
+			case u.wake <- struct{}{}:
+			default:
+			}
+		}
 		u.logCall(ctx, "tool", req.Params.Name, start, false, err.Error())
 		return &mcp.CallToolResult{
 			IsError: true,
